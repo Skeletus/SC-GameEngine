@@ -46,8 +46,9 @@ namespace sc
   bool VkRenderer::init(SDL_Window* window, const VkConfig& cfg)
   {
     m_cfg = cfg;
+    m_window = window;
 
-    if (!createInstance(window)) return false;
+    if (!createInstance()) return false;
     if (m_cfg.enableValidation && !setupDebug()) return false;
     if (!createSurface(window)) return false;
     if (!pickPhysicalDevice()) return false;
@@ -66,9 +67,12 @@ namespace sc
   {
     if (m_device) vkDeviceWaitIdle(m_device);
 
-    if (m_inFlight) vkDestroyFence(m_device, m_inFlight, nullptr);
-    if (m_renderFinished) vkDestroySemaphore(m_device, m_renderFinished, nullptr);
-    if (m_imageAvailable) vkDestroySemaphore(m_device, m_imageAvailable, nullptr);
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i)
+    {
+      if (m_inFlight[i]) vkDestroyFence(m_device, m_inFlight[i], nullptr);
+      if (m_renderFinished[i]) vkDestroySemaphore(m_device, m_renderFinished[i], nullptr);
+      if (m_imageAvailable[i]) vkDestroySemaphore(m_device, m_imageAvailable[i], nullptr);
+    }
 
     if (m_cmdPool) vkDestroyCommandPool(m_device, m_cmdPool, nullptr);
 
@@ -90,7 +94,7 @@ namespace sc
     sc::log(sc::LogLevel::Info, "Vulkan shutdown complete.");
   }
 
-  bool VkRenderer::createInstance(SDL_Window* window)
+  bool VkRenderer::createInstance()
   {
     // SDL required extensions
     unsigned extCount = 0;
@@ -286,8 +290,10 @@ namespace sc
     VkExtent2D extent = caps.currentExtent;
     if (extent.width == 0xFFFFFFFF)
     {
-      extent.width = 1280;
-      extent.height = 720;
+      int w = 0, h = 0;
+      SDL_Vulkan_GetDrawableSize(m_window, &w, &h); // necesitas pasar window a createSwapchain o guardar SDL_Window*
+      extent.width  = (uint32_t)w;
+      extent.height = (uint32_t)h;
     }
 
     uint32_t imageCount = caps.minImageCount + 1;
@@ -448,15 +454,18 @@ namespace sc
   bool VkRenderer::createSync()
   {
     VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    vkCreateSemaphore(m_device, &sci, nullptr, &m_imageAvailable);
-    vkCreateSemaphore(m_device, &sci, nullptr, &m_renderFinished);
-
     VkFenceCreateInfo fci{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    vkCreateFence(m_device, &fci, nullptr, &m_inFlight);
 
-    return m_imageAvailable && m_renderFinished && m_inFlight;
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i)
+    {
+      if (vkCreateSemaphore(m_device, &sci, nullptr, &m_imageAvailable[i]) != VK_SUCCESS) return false;
+      if (vkCreateSemaphore(m_device, &sci, nullptr, &m_renderFinished[i]) != VK_SUCCESS) return false;
+      if (vkCreateFence(m_device, &fci, nullptr, &m_inFlight[i]) != VK_SUCCESS) return false;
+    }
+    return true;
   }
+
 
   void VkRenderer::destroySwapchainObjects()
   {
@@ -468,18 +477,74 @@ namespace sc
     m_swapchainImages.clear();
   }
 
+  bool VkRenderer::recreateSwapchain()
+  {
+    int w = 0, h = 0;
+    SDL_Vulkan_GetDrawableSize(m_window, &w, &h);
+
+    // minimizado o tamaño inválido: no recrear aún
+    if (w == 0 || h == 0)
+      return false;
+
+    vkDeviceWaitIdle(m_device);
+
+    destroySwapchainObjects();
+    if (m_swapchain) { vkDestroySwapchainKHR(m_device, m_swapchain, nullptr); m_swapchain = VK_NULL_HANDLE; }
+
+    if (m_renderPass) { vkDestroyRenderPass(m_device, m_renderPass, nullptr); m_renderPass = VK_NULL_HANDLE; }
+
+    if (m_cmdPool) { vkDestroyCommandPool(m_device, m_cmdPool, nullptr); m_cmdPool = VK_NULL_HANDLE; }
+
+    if (!createSwapchain()) return false;
+    if (!createRenderPass()) return false;
+    if (!createFramebuffers()) return false;
+    if (!createCommands()) return false;
+
+    m_swapchainDirty = false;
+    return true;
+  }
+
+
+
   bool VkRenderer::beginFrame()
   {
-    vkWaitForFences(m_device, 1, &m_inFlight, VK_TRUE, UINT64_MAX);
-    vkResetFences(m_device, 1, &m_inFlight);
+    // 0) Si resize/present marcó dirty, recrear primero (no tocar fences ni acquire)
+    if (m_swapchainDirty)
+    {
+      if (!recreateSwapchain())
+        return false;
+      return false;
+    }
 
-    VkResult r = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX, m_imageAvailable, VK_NULL_HANDLE, &m_imageIndex);
-    if (r != VK_SUCCESS)
+    // 1) Espera el frame-in-flight actual
+    vkWaitForFences(m_device, 1, &m_inFlight[m_frameIndex], VK_TRUE, UINT64_MAX);
+    vkResetFences(m_device, 1, &m_inFlight[m_frameIndex]);
+
+    // 2) Acquire
+    VkResult r = vkAcquireNextImageKHR(
+      m_device, m_swapchain, UINT64_MAX,
+      m_imageAvailable[m_frameIndex], VK_NULL_HANDLE,
+      &m_imageIndex
+    );
+
+    if (r == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+      m_swapchainDirty = true;   // marca y recrea en el siguiente beginFrame
+      return false;
+    }
+
+    if (r == VK_SUBOPTIMAL_KHR)
+    {
+      // sigue, pero recrea pronto
+      m_swapchainDirty = true;
+    }
+    else if (r != VK_SUCCESS)
     {
       sc::log(sc::LogLevel::Error, "vkAcquireNextImageKHR failed (%d)", (int)r);
       return false;
     }
 
+    // 3) Record commands
     VkCommandBuffer cmd = m_cmdBuffers[m_imageIndex];
     vkResetCommandBuffer(cmd, 0);
 
@@ -495,41 +560,66 @@ namespace sc
     VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     rpbi.renderPass = m_renderPass;
     rpbi.framebuffer = m_framebuffers[m_imageIndex];
+    rpbi.renderArea.offset = { 0, 0 };
     rpbi.renderArea.extent = m_swapchainExtent;
     rpbi.clearValueCount = 1;
     rpbi.pClearValues = &clear;
 
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-    // (no draw yet)
     vkCmdEndRenderPass(cmd);
 
     vkEndCommandBuffer(cmd);
     return true;
   }
 
+
   void VkRenderer::endFrame()
   {
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
+    VkCommandBuffer cmd = m_cmdBuffers[m_imageIndex];
+
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.waitSemaphoreCount = 1;
-    si.pWaitSemaphores = &m_imageAvailable;
+    si.pWaitSemaphores = &m_imageAvailable[m_frameIndex];
     si.pWaitDstStageMask = &waitStage;
     si.commandBufferCount = 1;
-    VkCommandBuffer cmd = m_cmdBuffers[m_imageIndex];
     si.pCommandBuffers = &cmd;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &m_renderFinished;
+    si.pSignalSemaphores = &m_renderFinished[m_frameIndex];
 
-    vkQueueSubmit(m_gfxQueue, 1, &si, m_inFlight);
+    VkResult sr = vkQueueSubmit(m_gfxQueue, 1, &si, m_inFlight[m_frameIndex]);
+    if (sr != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkQueueSubmit failed (%d)", (int)sr);
+      // si submit falla, lo más seguro es marcar swapchain dirty y seguir intentando en el próximo frame
+      m_swapchainDirty = true;
+    }
 
     VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &m_renderFinished;
+    pi.pWaitSemaphores = &m_renderFinished[m_frameIndex];
     pi.swapchainCount = 1;
     pi.pSwapchains = &m_swapchain;
     pi.pImageIndices = &m_imageIndex;
 
-    vkQueuePresentKHR(m_gfxQueue, &pi);
+    VkResult pr = vkQueuePresentKHR(m_gfxQueue, &pi);
+
+    // OUT_OF_DATE: resize o surface invalid -> recrear swapchain en el siguiente frame
+    // SUBOPTIMAL: sigue funcionando pero mejor recrearlo (por resize o cambio de modo)
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR)
+    {
+      m_swapchainDirty = true;
+    }
+    else if (pr != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkQueuePresentKHR failed (%d)", (int)pr);
+      // errores raros -> marca dirty y luego decides si cerrar
+      m_swapchainDirty = true;
+    }
+
+    // avanzar frame-in-flight
+    m_frameIndex = (m_frameIndex + 1) % MAX_FRAMES;
   }
+
 }

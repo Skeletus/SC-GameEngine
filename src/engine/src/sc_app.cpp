@@ -23,6 +23,9 @@ namespace sc
       SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN
     );
 
+    m_w = cfg.width;
+    m_h = cfg.height;
+
     if (!m_window)
     {
       sc::log(sc::LogLevel::Error, "SDL_CreateWindow failed: %s", SDL_GetError());
@@ -50,15 +53,17 @@ namespace sc
   bool App::pump()
   {
     SDL_Event e;
+    
     while (SDL_PollEvent(&e))
     {
-      if (e.type == SDL_QUIT)
+      if (e.type == SDL_QUIT) m_running = false;
+      if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) m_running = false;
+
+      if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
       {
-        m_running = false;
-      }
-      if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE)
-      {
-        m_running = false;
+        m_w = e.window.data1;
+        m_h = e.window.data2;
+        m_resized = true;
       }
     }
 

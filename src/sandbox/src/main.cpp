@@ -1,7 +1,6 @@
 #include "sc_app.h"
 #include "sc_log.h"
 #include "sc_vk.h"
-#include <SDL.h>
 
 int main()
 {
@@ -32,10 +31,14 @@ int main()
 
   while (app.pump())
   {
+    if (app.wasResized())
+    {
+      vk.onResizeRequest();
+      app.clearResized();
+    }
+
     if (vk.beginFrame())
       vk.endFrame();
-
-    SDL_Delay(1);
   }
 
   vk.shutdown();
