@@ -1,0 +1,30 @@
+# Build outputs
+/build/
+/out/
+/bin/
+/obj/
+
+# Visual Studio
+/.vs/
+/*.sln
+/*.vcxproj*
+/CMakeSettings.json
+
+# CMake
+/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Debug symbols
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Cooked assets (normalmente no se versionan)
+assets/cooked/
