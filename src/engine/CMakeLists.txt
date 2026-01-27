@@ -3,6 +3,7 @@ add_library(sc_engine STATIC)
 target_sources(sc_engine
   PRIVATE
     src/sc_app.cpp
+    src/sc_vk.cpp
 )
 
 target_include_directories(sc_engine
@@ -14,6 +15,7 @@ target_link_libraries(sc_engine
   PUBLIC
     sc_core
     SDL2::SDL2-static
+    Vulkan::Vulkan
 )
 
 if (SC_ENABLE_WARNINGS)

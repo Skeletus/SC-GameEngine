@@ -21,7 +21,8 @@ namespace sc
 
     // returns false when should quit
     bool pump();
-
+    SDL_Window* window() const { return m_window; }
+    
   private:
     SDL_Window* m_window = nullptr;
     bool m_running = true;

@@ -1,12 +1,13 @@
 #include "sc_app.h"
 #include "sc_log.h"
+#include "sc_vk.h"
 #include <SDL.h>
 
 int main()
 {
   sc::App app;
   sc::AppConfig cfg;
-  cfg.title = "sc_sandbox (SDL2 bring-up)";
+  cfg.title = "sc_sandbox (Vulkan bring-up)";
 
   if (!app.init(cfg))
   {
@@ -14,12 +15,30 @@ int main()
     return 1;
   }
 
-  while (app.pump())
+  sc::VkRenderer vk;
+  sc::VkConfig vkc;
+#if defined(SC_DEBUG)
+  vkc.enableValidation = true;
+#else
+  vkc.enableValidation = false;
+#endif
+
+  if (!vk.init(app.window(), vkc))
   {
-    // placeholder: here will go render + jobs + ECS later
-    SDL_Delay(1); // avoid pegging CPU 100% for now
+    sc::log(sc::LogLevel::Error, "Vulkan init failed.");
+    app.shutdown();
+    return 1;
   }
 
+  while (app.pump())
+  {
+    if (vk.beginFrame())
+      vk.endFrame();
+
+    SDL_Delay(1);
+  }
+
+  vk.shutdown();
   app.shutdown();
   return 0;
 }

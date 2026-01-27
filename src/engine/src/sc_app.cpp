@@ -20,7 +20,7 @@ namespace sc
       cfg.title,
       SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
       cfg.width, cfg.height,
-      SDL_WINDOW_SHOWN
+      SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN
     );
 
     if (!m_window)

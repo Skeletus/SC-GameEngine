@@ -41,6 +41,7 @@ set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(SDL2)
 
+find_package(Vulkan REQUIRED)
 
 # -------------------------
 # Engine modules
