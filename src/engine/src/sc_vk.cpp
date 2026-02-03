@@ -632,6 +632,12 @@ namespace sc
     m_memSnap = mem;
   }
 
+  void VkRenderer::setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched)
+  {
+    m_ecsSnap = ecs;
+    m_schedSnap = sched;
+  }
+
 
   void VkRenderer::destroySwapchainObjects()
   {
@@ -720,6 +726,7 @@ namespace sc
 
     m_debugUI.setFrameStats(m_frameIndex, m_imageIndex, m_swapchainExtent);
     m_debugUI.setTelemetry(m_jobsSnap, m_memSnap);
+    m_debugUI.setEcsStats(m_ecsSnap, m_schedSnap);
     m_debugUI.newFrame();
 
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -755,10 +762,14 @@ namespace sc
     scissor.extent = m_swapchainExtent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    if (!m_debugUI.isTrianglePaused())
+    if (!m_debugUI.isTrianglePaused() && m_drawList && !m_drawList->draws.empty())
     {
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
-      vkCmdDraw(cmd, 3, 1, 0, 0);
+      for (const auto& draw : m_drawList->draws)
+      {
+        (void)draw;
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+      }
     }
 
     m_debugUI.draw(cmd);

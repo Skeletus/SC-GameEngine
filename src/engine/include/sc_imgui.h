@@ -4,6 +4,8 @@
 
 #include "sc_jobs.h"
 #include "sc_memtrack.h"
+#include "sc_ecs.h"
+#include "sc_scheduler.h"
 
 struct SDL_Window;
 union SDL_Event;
@@ -32,6 +34,7 @@ namespace sc
 
     void setFrameStats(uint32_t frameIndex, uint32_t imageIndex, VkExtent2D extent);
     void setTelemetry(const JobsTelemetrySnapshot& jobs, const MemStats& mem);
+    void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
     bool isTrianglePaused() const { return m_pauseTriangle; }
 
   private:
@@ -67,5 +70,7 @@ namespace sc
 
     JobsTelemetrySnapshot m_jobsSnap{};
     MemStats m_memSnap{};
+    EcsStatsSnapshot m_ecsSnap{};
+    SchedulerStatsSnapshot m_schedSnap{};
   };
 }

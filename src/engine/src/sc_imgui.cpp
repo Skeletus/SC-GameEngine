@@ -116,6 +116,12 @@ namespace sc
     m_memSnap = mem;
   }
 
+  void DebugUI::setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched)
+  {
+    m_ecsSnap = ecs;
+    m_schedSnap = sched;
+  }
+
   void DebugUI::newFrame()
   {
     if (!m_initialized)
@@ -168,6 +174,22 @@ namespace sc
     for (uint8_t i = 0; i < (uint8_t)MemTag::Count; ++i)
     {
       ImGui::BulletText("%s: %llu", memTagName((MemTag)i), (unsigned long long)m_memSnap.bytesLive[i]);
+    }
+
+    ImGui::Separator();
+    ImGui::Text("ECS");
+    ImGui::Text("Entities: %u / %u", m_ecsSnap.entityAlive, m_ecsSnap.entityCapacity);
+    ImGui::BulletText("Transform: %u", m_ecsSnap.transforms);
+    ImGui::BulletText("Camera: %u", m_ecsSnap.cameras);
+    ImGui::BulletText("RenderMesh: %u", m_ecsSnap.renderMeshes);
+    ImGui::BulletText("Name: %u", m_ecsSnap.names);
+
+    ImGui::Separator();
+    ImGui::Text("Systems");
+    for (uint32_t i = 0; i < m_schedSnap.count; ++i)
+    {
+      const auto& e = m_schedSnap.entries[i];
+      ImGui::BulletText("%s (P%u): %.3f ms", e.name ? e.name : "(null)", (uint32_t)e.phase, e.ms);
     }
     ImGui::End();
   }

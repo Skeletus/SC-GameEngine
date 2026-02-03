@@ -7,6 +7,8 @@ target_sources(sc_core
     src/sc_memory.cpp
     src/sc_time.cpp
     src/sc_jobs.cpp
+    src/sc_ecs.cpp
+    src/sc_scheduler.cpp
 )
 
 target_include_directories(sc_core

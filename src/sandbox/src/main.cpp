@@ -3,11 +3,11 @@
 #include "sc_vk.h"
 #include "sc_jobs.h"
 #include "sc_memtrack.h"
+#include "sc_ecs.h"
+#include "sc_scheduler.h"
 
 #include <SDL.h>
 #include <thread>
-
-static volatile uint32_t g_jobSink = 0;
 
 static void handle_event(const SDL_Event& e, void* user)
 {
@@ -51,6 +51,28 @@ int main()
     return 1;
   }
 
+  sc::World world;
+  world.reserveEntities(1024);
+  world.renderQueue().reserve(1024);
+
+  sc::Scheduler scheduler;
+
+  sc::SpawnerState spawner{};
+  spawner.spawnCount = 256;
+  spawner.churnEvery = 120;
+  spawner.churnCount = 8;
+
+  sc::RenderPrepState renderPrep{};
+  renderPrep.queue = &world.renderQueue();
+
+  scheduler.addSystem("Spawner", sc::SystemPhase::Simulation, sc::SpawnerSystem, &spawner);
+  scheduler.addSystem("Transform", sc::SystemPhase::Simulation, sc::TransformSystem, nullptr, { "Spawner" });
+  scheduler.addSystem("RenderPrep", sc::SystemPhase::RenderPrep, sc::RenderPrepSystem, &renderPrep, { "Transform" });
+  scheduler.addSystem("Debug", sc::SystemPhase::Render, sc::DebugSystem, nullptr, { "RenderPrep" });
+  scheduler.finalize();
+
+  sc::Tick lastTicks = sc::nowTicks();
+
   while (app.pump())
   {
     if (app.wasResized())
@@ -60,17 +82,17 @@ int main()
     }
 
     jobs.beginFrame();
-    auto handle = jobs.Dispatch(10000, 64, [](const sc::JobContext& ctx)
-    {
-      uint32_t acc = 0;
-      for (uint32_t i = ctx.start; i < ctx.end; ++i)
-        acc += (i * 1664525u + 1013904223u);
-      g_jobSink += acc;
-    });
-    jobs.Wait(handle);
+
+    const sc::Tick now = sc::nowTicks();
+    const float dt = (float)sc::ticksToSeconds(now - lastTicks);
+    lastTicks = now;
+
+    scheduler.tick(world, dt);
     jobs.publishFrameTelemetry();
 
     vk.setTelemetry(jobs.getTelemetrySnapshot(), sc::memtrack_snapshot());
+    vk.setEcsStats(world.statsSnapshot(), scheduler.statsSnapshot());
+    vk.setDrawList(&world.renderQueue());
 
     if (vk.beginFrame())
       vk.endFrame();

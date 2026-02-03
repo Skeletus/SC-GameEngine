@@ -10,6 +10,8 @@ union SDL_Event;
 
 namespace sc
 {
+  struct RenderQueue;
+
   struct VkConfig
   {
     bool enableValidation = true;
@@ -34,6 +36,8 @@ namespace sc
     bool beginFrame();
     void endFrame();
     void setTelemetry(const JobsTelemetrySnapshot& jobs, const MemStats& mem);
+    void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
+    void setDrawList(const RenderQueue* list) { m_drawList = list; }
 
   private:
     bool createInstance();
@@ -102,5 +106,8 @@ namespace sc
     DebugUI m_debugUI{};
     JobsTelemetrySnapshot m_jobsSnap{};
     MemStats m_memSnap{};
+    EcsStatsSnapshot m_ecsSnap{};
+    SchedulerStatsSnapshot m_schedSnap{};
+    const RenderQueue* m_drawList = nullptr;
   };
 }
