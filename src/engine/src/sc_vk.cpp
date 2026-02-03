@@ -7,6 +7,7 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <fstream>
 
 namespace sc
 {
@@ -55,6 +56,11 @@ namespace sc
     if (!createDevice()) return false;
     if (!createSwapchain()) return false;
     if (!createRenderPass()) return false;
+    if (m_cfg.enableDebugUI)
+    {
+      if (!m_debugUI.init(m_window, m_instance, m_device, m_phys, m_gfxFamily, m_gfxQueue, m_renderPass, (uint32_t)m_swapchainImages.size())) return false;
+    }
+    if (!createPipeline()) return false;
     if (!createFramebuffers()) return false;
     if (!createCommands()) return false;
     if (!createSync()) return false;
@@ -77,6 +83,8 @@ namespace sc
     if (m_cmdPool) vkDestroyCommandPool(m_device, m_cmdPool, nullptr);
 
     destroySwapchainObjects();
+    destroyPipeline();
+    m_debugUI.shutdown();
 
     if (m_renderPass) vkDestroyRenderPass(m_device, m_renderPass, nullptr);
 
@@ -398,6 +406,153 @@ namespace sc
     return true;
   }
 
+  std::vector<uint8_t> VkRenderer::readFile(const char* path)
+  {
+    std::ifstream file(path, std::ios::ate | std::ios::binary);
+    if (!file.is_open())
+    {
+      sc::log(sc::LogLevel::Error, "Shader file not found: %s", path);
+      return {};
+    }
+
+    const size_t size = (size_t)file.tellg();
+    std::vector<uint8_t> buffer(size);
+    file.seekg(0);
+    file.read(reinterpret_cast<char*>(buffer.data()), size);
+    file.close();
+    return buffer;
+  }
+
+  VkShaderModule VkRenderer::createShaderModule(const std::vector<uint8_t>& code)
+  {
+    if (code.empty())
+      return VK_NULL_HANDLE;
+
+    VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    ci.codeSize = code.size();
+    ci.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+    VkShaderModule module = VK_NULL_HANDLE;
+    VkResult r = vkCreateShaderModule(m_device, &ci, nullptr, &module);
+    if (r != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkCreateShaderModule failed (%d)", (int)r);
+      return VK_NULL_HANDLE;
+    }
+    return module;
+  }
+
+  bool VkRenderer::createPipeline()
+  {
+    const char* vsPath = "shaders/triangle.vert.spv";
+    const char* fsPath = "shaders/triangle.frag.spv";
+
+    auto vsCode = readFile(vsPath);
+    auto fsCode = readFile(fsPath);
+    if (vsCode.empty() || fsCode.empty())
+      return false;
+
+    VkShaderModule vs = createShaderModule(vsCode);
+    VkShaderModule fs = createShaderModule(fsCode);
+    if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE)
+    {
+      if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+      if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+      return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vs;
+    stages[0].pName = "main";
+
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fs;
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+
+    VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    ia.primitiveRestartEnable = VK_FALSE;
+
+    VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vp.viewportCount = 1;
+    vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.depthClampEnable = VK_FALSE;
+    rs.rasterizerDiscardEnable = VK_FALSE;
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.lineWidth = 1.0f;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.depthBiasEnable = VK_FALSE;
+
+    VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState cbAttach{};
+    cbAttach.colorWriteMask =
+      VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    cbAttach.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1;
+    cb.pAttachments = &cbAttach;
+
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dyn.dynamicStateCount = (uint32_t)(sizeof(dynStates) / sizeof(dynStates[0]));
+    dyn.pDynamicStates = dynStates;
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    VkResult lr = vkCreatePipelineLayout(m_device, &plci, nullptr, &m_pipelineLayout);
+    if (lr != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkCreatePipelineLayout failed (%d)", (int)lr);
+      vkDestroyShaderModule(m_device, vs, nullptr);
+      vkDestroyShaderModule(m_device, fs, nullptr);
+      return false;
+    }
+
+    VkGraphicsPipelineCreateInfo gpci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    gpci.stageCount = 2;
+    gpci.pStages = stages;
+    gpci.pVertexInputState = &vi;
+    gpci.pInputAssemblyState = &ia;
+    gpci.pViewportState = &vp;
+    gpci.pRasterizationState = &rs;
+    gpci.pMultisampleState = &ms;
+    gpci.pColorBlendState = &cb;
+    gpci.pDynamicState = &dyn;
+    gpci.layout = m_pipelineLayout;
+    gpci.renderPass = m_renderPass;
+    gpci.subpass = 0;
+
+    VkResult pr = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpci, nullptr, &m_pipeline);
+    vkDestroyShaderModule(m_device, vs, nullptr);
+    vkDestroyShaderModule(m_device, fs, nullptr);
+
+    if (pr != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkCreateGraphicsPipelines failed (%d)", (int)pr);
+      return false;
+    }
+
+    sc::log(sc::LogLevel::Info, "Pipeline created (triangle).");
+    return true;
+  }
+
+  void VkRenderer::destroyPipeline()
+  {
+    if (m_pipeline) { vkDestroyPipeline(m_device, m_pipeline, nullptr); m_pipeline = VK_NULL_HANDLE; }
+    if (m_pipelineLayout) { vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr); m_pipelineLayout = VK_NULL_HANDLE; }
+  }
+
   bool VkRenderer::createFramebuffers()
   {
     m_framebuffers.resize(m_swapchainViews.size());
@@ -466,6 +621,17 @@ namespace sc
     return true;
   }
 
+  void VkRenderer::onSDLEvent(const SDL_Event& e)
+  {
+    m_debugUI.processEvent(e);
+  }
+
+  void VkRenderer::setTelemetry(const JobsTelemetrySnapshot& jobs, const MemStats& mem)
+  {
+    m_jobsSnap = jobs;
+    m_memSnap = mem;
+  }
+
 
   void VkRenderer::destroySwapchainObjects()
   {
@@ -491,12 +657,16 @@ namespace sc
     destroySwapchainObjects();
     if (m_swapchain) { vkDestroySwapchainKHR(m_device, m_swapchain, nullptr); m_swapchain = VK_NULL_HANDLE; }
 
+    destroyPipeline();
+
     if (m_renderPass) { vkDestroyRenderPass(m_device, m_renderPass, nullptr); m_renderPass = VK_NULL_HANDLE; }
 
     if (m_cmdPool) { vkDestroyCommandPool(m_device, m_cmdPool, nullptr); m_cmdPool = VK_NULL_HANDLE; }
 
     if (!createSwapchain()) return false;
     if (!createRenderPass()) return false;
+    if (!m_debugUI.onSwapchainRecreated(m_renderPass, (uint32_t)m_swapchainImages.size())) return false;
+    if (!createPipeline()) return false;
     if (!createFramebuffers()) return false;
     if (!createCommands()) return false;
 
@@ -548,6 +718,10 @@ namespace sc
     VkCommandBuffer cmd = m_cmdBuffers[m_imageIndex];
     vkResetCommandBuffer(cmd, 0);
 
+    m_debugUI.setFrameStats(m_frameIndex, m_imageIndex, m_swapchainExtent);
+    m_debugUI.setTelemetry(m_jobsSnap, m_memSnap);
+    m_debugUI.newFrame();
+
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(cmd, &bi);
 
@@ -566,6 +740,29 @@ namespace sc
     rpbi.pClearValues = &clear;
 
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)m_swapchainExtent.width;
+    viewport.height = (float)m_swapchainExtent.height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = m_swapchainExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    if (!m_debugUI.isTrianglePaused())
+    {
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+      vkCmdDraw(cmd, 3, 1, 0, 0);
+    }
+
+    m_debugUI.draw(cmd);
+
     vkCmdEndRenderPass(cmd);
 
     vkEndCommandBuffer(cmd);

@@ -3,6 +3,7 @@ add_library(sc_engine STATIC)
 target_sources(sc_engine
   PRIVATE
     src/sc_app.cpp
+    src/sc_imgui.cpp
     src/sc_vk.cpp
 )
 
@@ -16,6 +17,8 @@ target_link_libraries(sc_engine
     sc_core
     SDL2::SDL2-static
     Vulkan::Vulkan
+  PRIVATE
+    imgui
 )
 
 if (SC_ENABLE_WARNINGS)

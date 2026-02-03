@@ -65,6 +65,9 @@ namespace sc
         m_h = e.window.data2;
         m_resized = true;
       }
+
+      if (m_eventCb)
+        m_eventCb(e, m_eventUser);
     }
 
     // dt measurement (for future frame pacing)

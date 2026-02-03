@@ -2,6 +2,7 @@
 #include <cstdint>
 
 struct SDL_Window;
+union SDL_Event;
 
 namespace sc
 {
@@ -16,11 +17,14 @@ namespace sc
   class App
   {
   public:
+    using EventCallback = void(*)(const SDL_Event& e, void* user);
+
     bool init(const AppConfig& cfg);
     void shutdown();
 
     // returns false when should quit
     bool pump();
+    void setEventCallback(EventCallback cb, void* user) { m_eventCb = cb; m_eventUser = user; }
     SDL_Window* window() const { return m_window; }
 
     bool wasResized() const { return m_resized; }
@@ -35,5 +39,8 @@ namespace sc
     int m_w = 0, m_h = 0;
     uint64_t m_lastCounter = 0;
     double m_freq = 0.0;
+
+    EventCallback m_eventCb = nullptr;
+    void* m_eventUser = nullptr;
   };
 }

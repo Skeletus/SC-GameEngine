@@ -3,6 +3,10 @@ add_library(sc_core STATIC)
 target_sources(sc_core
   PRIVATE
     src/sc_log.cpp
+    src/sc_memtrack.cpp
+    src/sc_memory.cpp
+    src/sc_time.cpp
+    src/sc_jobs.cpp
 )
 
 target_include_directories(sc_core

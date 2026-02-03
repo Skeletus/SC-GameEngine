@@ -3,13 +3,17 @@
 #include <vector>
 #include <cstdint>
 
+#include "sc_imgui.h"
+
 struct SDL_Window;
+union SDL_Event;
 
 namespace sc
 {
   struct VkConfig
   {
     bool enableValidation = true;
+    bool enableDebugUI = true;
   };
 
   class VkRenderer
@@ -22,12 +26,14 @@ namespace sc
 
     SDL_Window* m_window = nullptr;
 
+    void onSDLEvent(const SDL_Event& e);
 
     // Llama esto cuando SDL notifique resize (SIZE_CHANGED)
     void onResizeRequest() { m_swapchainDirty = true; }
 
     bool beginFrame();
     void endFrame();
+    void setTelemetry(const JobsTelemetrySnapshot& jobs, const MemStats& mem);
 
   private:
     bool createInstance();
@@ -38,12 +44,17 @@ namespace sc
 
     bool createSwapchain();
     bool createRenderPass();
+    bool createPipeline();
     bool createFramebuffers();
     bool createCommands();
     bool createSync();
 
     bool recreateSwapchain();
     void destroySwapchainObjects();
+    void destroyPipeline();
+
+    std::vector<uint8_t> readFile(const char* path);
+    VkShaderModule createShaderModule(const std::vector<uint8_t>& code);
 
   private:
     VkConfig m_cfg{};
@@ -70,6 +81,10 @@ namespace sc
     VkRenderPass m_renderPass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> m_framebuffers;
 
+    // Pipeline
+    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_pipeline = VK_NULL_HANDLE;
+
     // Commands
     VkCommandPool m_cmdPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> m_cmdBuffers;
@@ -83,5 +98,9 @@ namespace sc
     uint32_t m_imageIndex = 0; // swapchain image index actual
 
     bool m_swapchainDirty = false; // marcado por resize o out-of-date
+
+    DebugUI m_debugUI{};
+    JobsTelemetrySnapshot m_jobsSnap{};
+    MemStats m_memSnap{};
   };
 }
