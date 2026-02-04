@@ -160,7 +160,7 @@ namespace sc
     ImGui::Separator();
     ImGui::Text("Resolution: %ux%u", m_extent.width, m_extent.height);
     ImGui::Text("FrameIndex: %u  ImageIndex: %u", m_frameIndex, m_imageIndex);
-    ImGui::Checkbox("Pause Triangle", &m_pauseTriangle);
+    ImGui::Checkbox("Pause Meshes", &m_pauseTriangle);
     ImGui::PlotLines("Frame Time (ms)", m_frameTimes, (int)m_frameCount, (int)m_frameOffset, nullptr, 0.0f, 50.0f, ImVec2(0, 60));
     ImGui::Separator();
 
@@ -199,6 +199,18 @@ namespace sc
     {
       const auto& e = m_schedSnap.entries[i];
       ImGui::BulletText("%s (P%u): %.3f ms", e.name ? e.name : "(null)", (uint32_t)e.phase, e.ms);
+    }
+
+    if (m_debugDraw)
+    {
+      ImGui::Separator();
+      ImGui::Text("Debug Draw");
+      DebugDrawSettings& s = m_debugDraw->settings();
+      ImGui::Checkbox("Show Grid", &s.showGrid);
+      ImGui::SliderFloat("Grid Size", &s.gridSize, 1.0f, 200.0f, "%.1f");
+      ImGui::SliderFloat("Grid Step", &s.gridStep, 0.1f, 10.0f, "%.1f");
+      if (s.gridStep > s.gridSize)
+        s.gridStep = s.gridSize;
     }
 
     if (m_world)

@@ -5,6 +5,7 @@
 #include "sc_memtrack.h"
 #include "sc_ecs.h"
 #include "sc_scheduler.h"
+#include "sc_debug_draw.h"
 
 #include <SDL.h>
 #include <thread>
@@ -68,11 +69,15 @@ int main()
   sc::CameraSystemState cameraState{};
   cameraState.frame = &world.renderFrame();
 
+  sc::DebugDraw debugDraw{};
+  debugDraw.reserve(65536);
+
   scheduler.addSystem("Spawner", sc::SystemPhase::Simulation, sc::SpawnerSystem, &spawner);
   scheduler.addSystem("Transform", sc::SystemPhase::Simulation, sc::TransformSystem, nullptr, { "Spawner" });
   scheduler.addSystem("Camera", sc::SystemPhase::Simulation, sc::CameraSystem, &cameraState, { "Transform" });
   scheduler.addSystem("RenderPrep", sc::SystemPhase::RenderPrep, sc::RenderPrepSystem, &renderPrep, { "Camera" });
-  scheduler.addSystem("Debug", sc::SystemPhase::Render, sc::DebugSystem, nullptr, { "RenderPrep" });
+  scheduler.addSystem("DebugDraw", sc::SystemPhase::RenderPrep, sc::DebugDrawSystem, &debugDraw, { "RenderPrep" });
+  scheduler.addSystem("Debug", sc::SystemPhase::Render, sc::DebugSystem, nullptr, { "DebugDraw" });
   scheduler.finalize();
 
   sc::Tick lastTicks = sc::nowTicks();
@@ -99,6 +104,7 @@ int main()
     vk.setEcsStats(world.statsSnapshot(), scheduler.statsSnapshot());
     vk.setRenderFrame(&world.renderFrame());
     vk.setDebugWorld(&world, spawner.camera, spawner.triangle, spawner.root);
+    vk.setDebugDraw(&debugDraw);
 
     if (vk.beginFrame())
       vk.endFrame();

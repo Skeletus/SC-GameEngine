@@ -5,6 +5,7 @@
 #include "sc_jobs.h"
 #include "sc_memtrack.h"
 #include "sc_ecs.h"
+#include "sc_debug_draw.h"
 #include "sc_scheduler.h"
 
 struct SDL_Window;
@@ -37,6 +38,7 @@ namespace sc
     void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
     bool isTrianglePaused() const { return m_pauseTriangle; }
     void setWorldContext(World* world, Entity camera, Entity triangle, Entity root);
+    void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; }
 
   private:
     bool createDescriptorPool();
@@ -78,5 +80,6 @@ namespace sc
     Entity m_cameraEntity = kInvalidEntity;
     Entity m_triangleEntity = kInvalidEntity;
     Entity m_rootEntity = kInvalidEntity;
+    DebugDraw* m_debugDraw = nullptr;
   };
 }

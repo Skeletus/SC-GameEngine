@@ -394,6 +394,7 @@ namespace sc
     uint32_t churnCount = 8;
     std::vector<Entity> active;
     Entity triangle{};
+    Entity cube{};
     Entity camera{};
     Entity root{};
   };

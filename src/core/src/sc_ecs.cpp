@@ -344,6 +344,15 @@ namespace sc
       world.add<RenderMesh>(state->triangle).meshId = 0;
       setName(world.add<Name>(state->triangle), "TriangleEntity");
 
+      state->cube = world.create();
+      {
+        Transform& t = world.add<Transform>(state->cube);
+        setParent(t, state->root);
+        setLocalPosition(t, 0.0f, 0.0f, 0.0f);
+      }
+      world.add<RenderMesh>(state->cube).meshId = 1;
+      setName(world.add<Name>(state->cube), "CubeEntity");
+
       for (uint32_t i = 0; i < state->spawnCount; ++i)
       {
         Entity e = world.create();

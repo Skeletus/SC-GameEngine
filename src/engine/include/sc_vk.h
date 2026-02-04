@@ -2,6 +2,7 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <cstdint>
+#include <cstddef>
 
 #include "sc_imgui.h"
 
@@ -11,6 +12,22 @@ union SDL_Event;
 namespace sc
 {
   struct RenderFrameData;
+  struct DebugDraw;
+
+  struct MeshVertex
+  {
+    float pos[3]{};
+    float color[3]{};
+  };
+
+  struct GpuMesh
+  {
+    VkBuffer vertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+    VkBuffer indexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+    uint32_t indexCount = 0;
+  };
 
   struct VkConfig
   {
@@ -39,6 +56,7 @@ namespace sc
     void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
     void setRenderFrame(const RenderFrameData* frame) { m_renderFrame = frame; }
     void setDebugWorld(World* world, Entity camera, Entity triangle, Entity root);
+    void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; m_debugUI.setDebugDraw(draw); }
 
     float swapchainAspect() const;
 
@@ -52,9 +70,14 @@ namespace sc
     bool createSwapchain();
     bool createRenderPass();
     bool createPipeline();
+    bool createDepthResources();
     bool createFramebuffers();
     bool createCommands();
     bool createSync();
+    bool createMeshes();
+    void destroyMeshes();
+    bool createDebugDrawBuffers(size_t vertexCapacity);
+    void destroyDebugDrawBuffers();
 
     bool recreateSwapchain();
     void destroySwapchainObjects();
@@ -68,6 +91,7 @@ namespace sc
     bool createDescriptorPool();
     bool allocateDescriptorSets();
     void destroyUniformBuffers();
+    VkFormat findDepthFormat() const;
 
   private:
     VkConfig m_cfg{};
@@ -93,10 +117,15 @@ namespace sc
     // Render targets
     VkRenderPass m_renderPass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> m_framebuffers;
+    VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
+    std::vector<VkImage> m_depthImages;
+    std::vector<VkDeviceMemory> m_depthMemory;
+    std::vector<VkImageView> m_depthViews;
 
     // Pipeline
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkPipeline m_debugPipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_globalSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_globalDescriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet m_globalSets[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
@@ -124,5 +153,13 @@ namespace sc
     EcsStatsSnapshot m_ecsSnap{};
     SchedulerStatsSnapshot m_schedSnap{};
     const RenderFrameData* m_renderFrame = nullptr;
+    DebugDraw* m_debugDraw = nullptr;
+
+    std::vector<GpuMesh> m_meshes;
+
+    VkBuffer m_debugVertexBuffers[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDeviceMemory m_debugVertexMemory[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    void* m_debugVertexMapped[MAX_FRAMES] = { nullptr, nullptr };
+    size_t m_debugVertexCapacity = 0;
   };
 }

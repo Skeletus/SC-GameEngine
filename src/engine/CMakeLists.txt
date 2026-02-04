@@ -3,6 +3,7 @@ add_library(sc_engine STATIC)
 target_sources(sc_engine
   PRIVATE
     src/sc_app.cpp
+    src/sc_debug_draw.cpp
     src/sc_imgui.cpp
     src/sc_vk.cpp
 )
