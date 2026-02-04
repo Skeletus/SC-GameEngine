@@ -1,5 +1,6 @@
 #include "sc_vk.h"
 #include "sc_log.h"
+#include "sc_paths.h"
 
 #include <SDL.h>
 #include <SDL_vulkan.h>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <algorithm>
 #include <fstream>
+#include <filesystem>
 
 namespace sc
 {
@@ -87,15 +89,16 @@ namespace sc
     if (!createUniformBuffers()) return false;
     if (!createDescriptorPool()) return false;
     if (!allocateDescriptorSets()) return false;
+    if (!createCommands()) return false;
     if (m_cfg.enableDebugUI)
     {
       if (!m_debugUI.init(m_window, m_instance, m_device, m_phys, m_gfxFamily, m_gfxQueue, m_renderPass, (uint32_t)m_swapchainImages.size())) return false;
     }
     if (!createPipeline()) return false;
     if (!createMeshes()) return false;
+    if (!createDefaultAssets()) return false;
     if (!createDebugDrawBuffers(65536)) return false;
     if (!createFramebuffers()) return false;
-    if (!createCommands()) return false;
     if (!createSync()) return false;
 
     sc::log(sc::LogLevel::Info, "Vulkan init OK.");
@@ -118,11 +121,13 @@ namespace sc
     destroySwapchainObjects();
     destroyPipeline();
     destroyDebugDrawBuffers();
+    m_assets.shutdown();
     destroyMeshes();
     m_debugUI.shutdown();
 
     destroyUniformBuffers();
     if (m_globalDescriptorPool) { vkDestroyDescriptorPool(m_device, m_globalDescriptorPool, nullptr); m_globalDescriptorPool = VK_NULL_HANDLE; }
+    if (m_materialSetLayout) { vkDestroyDescriptorSetLayout(m_device, m_materialSetLayout, nullptr); m_materialSetLayout = VK_NULL_HANDLE; }
     if (m_globalSetLayout) { vkDestroyDescriptorSetLayout(m_device, m_globalSetLayout, nullptr); m_globalSetLayout = VK_NULL_HANDLE; }
 
     if (m_renderPass) vkDestroyRenderPass(m_device, m_renderPass, nullptr);
@@ -276,6 +281,9 @@ namespace sc
 
   bool VkRenderer::createDevice()
   {
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(m_phys, &supported);
+
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{ VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
     qci.queueFamilyIndex = m_gfxFamily;
@@ -290,6 +298,10 @@ namespace sc
     dci.enabledExtensionCount = 1;
     dci.ppEnabledExtensionNames = exts;
 
+    VkPhysicalDeviceFeatures enabled{};
+    enabled.samplerAnisotropy = supported.samplerAnisotropy ? VK_TRUE : VK_FALSE;
+    dci.pEnabledFeatures = &enabled;
+
     VkResult r = vkCreateDevice(m_phys, &dci, nullptr, &m_device);
     if (r != VK_SUCCESS)
     {
@@ -298,6 +310,12 @@ namespace sc
     }
 
     vkGetDeviceQueue(m_device, m_gfxFamily, 0, &m_gfxQueue);
+
+    m_samplerAnisotropyEnabled = supported.samplerAnisotropy == VK_TRUE;
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(m_phys, &props);
+    m_samplerMaxAnisotropy = m_samplerAnisotropyEnabled ? props.limits.maxSamplerAnisotropy : 1.0f;
+
     return true;
   }
 
@@ -308,11 +326,21 @@ namespace sc
 
     uint32_t fCount = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_phys, m_surface, &fCount, nullptr);
+    if (fCount == 0)
+    {
+      sc::log(sc::LogLevel::Error, "No Vulkan surface formats available.");
+      return false;
+    }
     std::vector<VkSurfaceFormatKHR> formats(fCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_phys, m_surface, &fCount, formats.data());
 
     uint32_t pCount = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(m_phys, m_surface, &pCount, nullptr);
+    if (pCount == 0)
+    {
+      sc::log(sc::LogLevel::Error, "No Vulkan present modes available.");
+      return false;
+    }
     std::vector<VkPresentModeKHR> presents(pCount);
     vkGetPhysicalDeviceSurfacePresentModesKHR(m_phys, m_surface, &pCount, presents.data());
 
@@ -334,13 +362,29 @@ namespace sc
       if (m == VK_PRESENT_MODE_MAILBOX_KHR) { pm = m; break; }
     }
 
+    int drawableW = 0, drawableH = 0;
+    SDL_Vulkan_GetDrawableSize(m_window, &drawableW, &drawableH);
+
     VkExtent2D extent = caps.currentExtent;
-    if (extent.width == 0xFFFFFFFF)
+    if (extent.width == UINT32_MAX || extent.height == UINT32_MAX)
     {
-      int w = 0, h = 0;
-      SDL_Vulkan_GetDrawableSize(m_window, &w, &h); // necesitas pasar window a createSwapchain o guardar SDL_Window*
-      extent.width  = (uint32_t)w;
-      extent.height = (uint32_t)h;
+      extent.width = static_cast<uint32_t>(std::max(drawableW, 0));
+      extent.height = static_cast<uint32_t>(std::max(drawableH, 0));
+      extent.width = std::clamp(extent.width, caps.minImageExtent.width, caps.maxImageExtent.width);
+      extent.height = std::clamp(extent.height, caps.minImageExtent.height, caps.maxImageExtent.height);
+    }
+    else if ((extent.width == 0 || extent.height == 0) && drawableW > 0 && drawableH > 0)
+    {
+      extent.width = static_cast<uint32_t>(drawableW);
+      extent.height = static_cast<uint32_t>(drawableH);
+      extent.width = std::clamp(extent.width, caps.minImageExtent.width, caps.maxImageExtent.width);
+      extent.height = std::clamp(extent.height, caps.minImageExtent.height, caps.maxImageExtent.height);
+    }
+
+    if (extent.width == 0 || extent.height == 0)
+    {
+      sc::log(sc::LogLevel::Info, "Swapchain deferred: drawable size is %dx%d (window likely minimized).", drawableW, drawableH);
+      return false;
     }
 
     uint32_t imageCount = caps.minImageCount + 1;
@@ -471,10 +515,11 @@ namespace sc
 
   std::vector<uint8_t> VkRenderer::readFile(const char* path)
   {
-    std::ifstream file(path, std::ios::ate | std::ios::binary);
+    const std::filesystem::path resolved = sc::resolveAssetPath(path);
+    std::ifstream file(resolved, std::ios::ate | std::ios::binary);
     if (!file.is_open())
     {
-      sc::log(sc::LogLevel::Error, "Shader file not found: %s", path);
+      sc::log(sc::LogLevel::Error, "Shader file not found: %s (%s)", path, resolved.string().c_str());
       return {};
     }
 
@@ -520,7 +565,24 @@ namespace sc
     VkResult r = vkCreateDescriptorSetLayout(m_device, &ci, nullptr, &m_globalSetLayout);
     if (r != VK_SUCCESS)
     {
-      sc::log(sc::LogLevel::Error, "vkCreateDescriptorSetLayout failed (%d)", (int)r);
+      sc::log(sc::LogLevel::Error, "vkCreateDescriptorSetLayout (global) failed (%d)", (int)r);
+      return false;
+    }
+
+    VkDescriptorSetLayoutBinding texBinding{};
+    texBinding.binding = 0;
+    texBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    texBinding.descriptorCount = 1;
+    texBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo mci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    mci.bindingCount = 1;
+    mci.pBindings = &texBinding;
+
+    r = vkCreateDescriptorSetLayout(m_device, &mci, nullptr, &m_materialSetLayout);
+    if (r != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkCreateDescriptorSetLayout (material) failed (%d)", (int)r);
       return false;
     }
     return true;
@@ -552,14 +614,16 @@ namespace sc
 
   bool VkRenderer::createDescriptorPool()
   {
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSize.descriptorCount = MAX_FRAMES;
+    VkDescriptorPoolSize poolSizes[2]{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[0].descriptorCount = MAX_FRAMES;
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[1].descriptorCount = 256;
 
     VkDescriptorPoolCreateInfo pci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    pci.maxSets = MAX_FRAMES;
-    pci.poolSizeCount = 1;
-    pci.pPoolSizes = &poolSize;
+    pci.maxSets = MAX_FRAMES + 256;
+    pci.poolSizeCount = 2;
+    pci.pPoolSizes = poolSizes;
 
     VkResult r = vkCreateDescriptorPool(m_device, &pci, nullptr, &m_globalDescriptorPool);
     if (r != VK_SUCCESS)
@@ -786,55 +850,66 @@ namespace sc
 
   bool VkRenderer::createPipeline()
   {
-    const char* vsPath = "shaders/mesh.vert.spv";
-    const char* fsPath = "shaders/mesh.frag.spv";
+    const char* unlitVsPath = "shaders/mesh.vert.spv";
+    const char* unlitFsPath = "shaders/mesh.frag.spv";
+    const char* texVsPath = "shaders/mesh_tex.vert.spv";
+    const char* texFsPath = "shaders/mesh_tex.frag.spv";
 
-    auto vsCode = readFile(vsPath);
-    auto fsCode = readFile(fsPath);
-    if (vsCode.empty() || fsCode.empty())
+    auto unlitVsCode = readFile(unlitVsPath);
+    auto unlitFsCode = readFile(unlitFsPath);
+    auto texVsCode = readFile(texVsPath);
+    auto texFsCode = readFile(texFsPath);
+    if (unlitVsCode.empty() || unlitFsCode.empty() || texVsCode.empty() || texFsCode.empty())
       return false;
 
-    VkShaderModule vs = createShaderModule(vsCode);
-    VkShaderModule fs = createShaderModule(fsCode);
-    if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE)
+    VkShaderModule unlitVs = createShaderModule(unlitVsCode);
+    VkShaderModule unlitFs = createShaderModule(unlitFsCode);
+    VkShaderModule texVs = createShaderModule(texVsCode);
+    VkShaderModule texFs = createShaderModule(texFsCode);
+    if (unlitVs == VK_NULL_HANDLE || unlitFs == VK_NULL_HANDLE || texVs == VK_NULL_HANDLE || texFs == VK_NULL_HANDLE)
     {
-      if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
-      if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+      if (unlitVs) vkDestroyShaderModule(m_device, unlitVs, nullptr);
+      if (unlitFs) vkDestroyShaderModule(m_device, unlitFs, nullptr);
+      if (texVs) vkDestroyShaderModule(m_device, texVs, nullptr);
+      if (texFs) vkDestroyShaderModule(m_device, texFs, nullptr);
       return false;
     }
-
-    VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vs;
-    stages[0].pName = "main";
-
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = fs;
-    stages[1].pName = "main";
 
     VkVertexInputBindingDescription binding{};
     binding.binding = 0;
     binding.stride = sizeof(MeshVertex);
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attrs[2]{};
-    attrs[0].binding = 0;
-    attrs[0].location = 0;
-    attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrs[0].offset = 0;
+    VkVertexInputAttributeDescription unlitAttrs[2]{};
+    unlitAttrs[0].binding = 0;
+    unlitAttrs[0].location = 0;
+    unlitAttrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    unlitAttrs[0].offset = 0;
 
-    attrs[1].binding = 0;
-    attrs[1].location = 1;
-    attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrs[1].offset = sizeof(float) * 3;
+    unlitAttrs[1].binding = 0;
+    unlitAttrs[1].location = 1;
+    unlitAttrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    unlitAttrs[1].offset = sizeof(float) * 3;
 
-    VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    vi.vertexBindingDescriptionCount = 1;
-    vi.pVertexBindingDescriptions = &binding;
-    vi.vertexAttributeDescriptionCount = 2;
-    vi.pVertexAttributeDescriptions = attrs;
+    VkPipelineVertexInputStateCreateInfo unlitVi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    unlitVi.vertexBindingDescriptionCount = 1;
+    unlitVi.pVertexBindingDescriptions = &binding;
+    unlitVi.vertexAttributeDescriptionCount = 2;
+    unlitVi.pVertexAttributeDescriptions = unlitAttrs;
+
+    VkVertexInputAttributeDescription texAttrs[3]{};
+    texAttrs[0] = unlitAttrs[0];
+    texAttrs[1] = unlitAttrs[1];
+    texAttrs[2].binding = 0;
+    texAttrs[2].location = 2;
+    texAttrs[2].format = VK_FORMAT_R32G32_SFLOAT;
+    texAttrs[2].offset = sizeof(float) * 6;
+
+    VkPipelineVertexInputStateCreateInfo texVi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    texVi.vertexBindingDescriptionCount = 1;
+    texVi.pVertexBindingDescriptions = &binding;
+    texVi.vertexAttributeDescriptionCount = 3;
+    texVi.pVertexAttributeDescriptions = texAttrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -883,24 +958,25 @@ namespace sc
     pcr.offset = 0;
     pcr.size = sizeof(Mat4);
 
+    const VkDescriptorSetLayout setLayouts[2] = { m_globalSetLayout, m_materialSetLayout };
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    plci.setLayoutCount = 1;
-    plci.pSetLayouts = &m_globalSetLayout;
+    plci.setLayoutCount = 2;
+    plci.pSetLayouts = setLayouts;
     plci.pushConstantRangeCount = 1;
     plci.pPushConstantRanges = &pcr;
     VkResult lr = vkCreatePipelineLayout(m_device, &plci, nullptr, &m_pipelineLayout);
     if (lr != VK_SUCCESS)
     {
       sc::log(sc::LogLevel::Error, "vkCreatePipelineLayout failed (%d)", (int)lr);
-      vkDestroyShaderModule(m_device, vs, nullptr);
-      vkDestroyShaderModule(m_device, fs, nullptr);
+      vkDestroyShaderModule(m_device, unlitVs, nullptr);
+      vkDestroyShaderModule(m_device, unlitFs, nullptr);
+      vkDestroyShaderModule(m_device, texVs, nullptr);
+      vkDestroyShaderModule(m_device, texFs, nullptr);
       return false;
     }
 
     VkGraphicsPipelineCreateInfo gpci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-    gpci.stageCount = 2;
-    gpci.pStages = stages;
-    gpci.pVertexInputState = &vi;
+    gpci.pVertexInputState = &unlitVi;
     gpci.pInputAssemblyState = &ia;
     gpci.pViewportState = &vp;
     gpci.pRasterizationState = &rs;
@@ -912,37 +988,104 @@ namespace sc
     gpci.renderPass = m_renderPass;
     gpci.subpass = 0;
 
-    VkResult pr = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpci, nullptr, &m_pipeline);
-    if (pr == VK_SUCCESS)
-    {
-      VkPipelineInputAssemblyStateCreateInfo iaLine = ia;
-      iaLine.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    VkPipelineShaderStageCreateInfo unlitStages[2]{};
+    unlitStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    unlitStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    unlitStages[0].module = unlitVs;
+    unlitStages[0].pName = "main";
+    unlitStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    unlitStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    unlitStages[1].module = unlitFs;
+    unlitStages[1].pName = "main";
+    gpci.stageCount = 2;
+    gpci.pStages = unlitStages;
 
-      VkPipelineDepthStencilStateCreateInfo dsLine = ds;
-      dsLine.depthWriteEnable = VK_FALSE;
-
-      gpci.pInputAssemblyState = &iaLine;
-      gpci.pDepthStencilState = &dsLine;
-
-      pr = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpci, nullptr, &m_debugPipeline);
-    }
-    vkDestroyShaderModule(m_device, vs, nullptr);
-    vkDestroyShaderModule(m_device, fs, nullptr);
-
+    VkResult pr = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpci, nullptr, &m_unlitPipeline);
     if (pr != VK_SUCCESS)
     {
-      sc::log(sc::LogLevel::Error, "vkCreateGraphicsPipelines failed (%d)", (int)pr);
+      sc::log(sc::LogLevel::Error, "vkCreateGraphicsPipelines (unlit) failed (%d)", (int)pr);
+      vkDestroyShaderModule(m_device, unlitVs, nullptr);
+      vkDestroyShaderModule(m_device, unlitFs, nullptr);
+      vkDestroyShaderModule(m_device, texVs, nullptr);
+      vkDestroyShaderModule(m_device, texFs, nullptr);
       return false;
     }
 
-    sc::log(sc::LogLevel::Info, "Pipelines created (mesh + debug lines).");
+    VkPipelineShaderStageCreateInfo texturedStages[2]{};
+    texturedStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    texturedStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    texturedStages[0].module = texVs;
+    texturedStages[0].pName = "main";
+    texturedStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    texturedStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    texturedStages[1].module = texFs;
+    texturedStages[1].pName = "main";
+    gpci.pStages = texturedStages;
+    gpci.pVertexInputState = &texVi;
+
+    pr = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpci, nullptr, &m_texturedPipeline);
+    if (pr != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkCreateGraphicsPipelines (textured) failed (%d)", (int)pr);
+      vkDestroyShaderModule(m_device, unlitVs, nullptr);
+      vkDestroyShaderModule(m_device, unlitFs, nullptr);
+      vkDestroyShaderModule(m_device, texVs, nullptr);
+      vkDestroyShaderModule(m_device, texFs, nullptr);
+      return false;
+    }
+
+    VkPipelineInputAssemblyStateCreateInfo iaLine = ia;
+    iaLine.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    VkPipelineDepthStencilStateCreateInfo dsLine = ds;
+    dsLine.depthWriteEnable = VK_FALSE;
+
+    VkVertexInputBindingDescription dbgBinding{};
+    dbgBinding.binding = 0;
+    dbgBinding.stride = sizeof(DebugVertex);
+    dbgBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription dbgAttrs[2]{};
+    dbgAttrs[0].binding = 0;
+    dbgAttrs[0].location = 0;
+    dbgAttrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    dbgAttrs[0].offset = 0;
+    dbgAttrs[1].binding = 0;
+    dbgAttrs[1].location = 1;
+    dbgAttrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    dbgAttrs[1].offset = sizeof(float) * 3;
+
+    VkPipelineVertexInputStateCreateInfo dbgVi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    dbgVi.vertexBindingDescriptionCount = 1;
+    dbgVi.pVertexBindingDescriptions = &dbgBinding;
+    dbgVi.vertexAttributeDescriptionCount = 2;
+    dbgVi.pVertexAttributeDescriptions = dbgAttrs;
+
+    gpci.pStages = unlitStages;
+    gpci.pInputAssemblyState = &iaLine;
+    gpci.pDepthStencilState = &dsLine;
+    gpci.pVertexInputState = &dbgVi;
+    pr = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpci, nullptr, &m_debugPipeline);
+
+    vkDestroyShaderModule(m_device, unlitVs, nullptr);
+    vkDestroyShaderModule(m_device, unlitFs, nullptr);
+    vkDestroyShaderModule(m_device, texVs, nullptr);
+    vkDestroyShaderModule(m_device, texFs, nullptr);
+
+    if (pr != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkCreateGraphicsPipelines (debug) failed (%d)", (int)pr);
+      return false;
+    }
+
+    sc::log(sc::LogLevel::Info, "Pipelines created (unlit + textured + debug).");
     return true;
   }
 
   void VkRenderer::destroyPipeline()
   {
     if (m_debugPipeline) { vkDestroyPipeline(m_device, m_debugPipeline, nullptr); m_debugPipeline = VK_NULL_HANDLE; }
-    if (m_pipeline) { vkDestroyPipeline(m_device, m_pipeline, nullptr); m_pipeline = VK_NULL_HANDLE; }
+    if (m_texturedPipeline) { vkDestroyPipeline(m_device, m_texturedPipeline, nullptr); m_texturedPipeline = VK_NULL_HANDLE; }
+    if (m_unlitPipeline) { vkDestroyPipeline(m_device, m_unlitPipeline, nullptr); m_unlitPipeline = VK_NULL_HANDLE; }
     if (m_pipelineLayout) { vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr); m_pipelineLayout = VK_NULL_HANDLE; }
   }
 
@@ -1021,31 +1164,52 @@ namespace sc
 
     const MeshVertex triVerts[] =
     {
-      { { -0.5f, -0.5f, 0.0f }, { 1.0f, 0.2f, 0.2f } },
-      { {  0.5f, -0.5f, 0.0f }, { 0.2f, 1.0f, 0.2f } },
-      { {  0.0f,  0.5f, 0.0f }, { 0.2f, 0.4f, 1.0f } }
+      { { -0.5f, -0.5f, 0.0f }, { 1.0f, 0.2f, 0.2f }, { 0.0f, 1.0f } },
+      { {  0.5f, -0.5f, 0.0f }, { 0.2f, 1.0f, 0.2f }, { 1.0f, 1.0f } },
+      { {  0.0f,  0.5f, 0.0f }, { 0.2f, 0.4f, 1.0f }, { 0.5f, 0.0f } }
     };
     const uint32_t triIndices[] = { 0, 1, 2 };
 
     const MeshVertex cubeVerts[] =
     {
-      { { -0.5f, -0.5f, -0.5f }, { 0.9f, 0.2f, 0.2f } },
-      { {  0.5f, -0.5f, -0.5f }, { 0.2f, 0.9f, 0.2f } },
-      { {  0.5f,  0.5f, -0.5f }, { 0.2f, 0.6f, 0.9f } },
-      { { -0.5f,  0.5f, -0.5f }, { 0.9f, 0.9f, 0.2f } },
-      { { -0.5f, -0.5f,  0.5f }, { 0.9f, 0.2f, 0.9f } },
-      { {  0.5f, -0.5f,  0.5f }, { 0.2f, 0.9f, 0.9f } },
-      { {  0.5f,  0.5f,  0.5f }, { 0.9f, 0.5f, 0.2f } },
-      { { -0.5f,  0.5f,  0.5f }, { 0.7f, 0.7f, 0.7f } }
+      { { -0.5f, -0.5f,  0.5f }, { 1.0f, 0.4f, 0.4f }, { 0.0f, 1.0f } },
+      { {  0.5f, -0.5f,  0.5f }, { 1.0f, 0.4f, 0.4f }, { 1.0f, 1.0f } },
+      { {  0.5f,  0.5f,  0.5f }, { 1.0f, 0.4f, 0.4f }, { 1.0f, 0.0f } },
+      { { -0.5f,  0.5f,  0.5f }, { 1.0f, 0.4f, 0.4f }, { 0.0f, 0.0f } },
+
+      { {  0.5f, -0.5f, -0.5f }, { 0.4f, 1.0f, 0.4f }, { 0.0f, 1.0f } },
+      { { -0.5f, -0.5f, -0.5f }, { 0.4f, 1.0f, 0.4f }, { 1.0f, 1.0f } },
+      { { -0.5f,  0.5f, -0.5f }, { 0.4f, 1.0f, 0.4f }, { 1.0f, 0.0f } },
+      { {  0.5f,  0.5f, -0.5f }, { 0.4f, 1.0f, 0.4f }, { 0.0f, 0.0f } },
+
+      { { -0.5f, -0.5f, -0.5f }, { 0.4f, 0.4f, 1.0f }, { 0.0f, 1.0f } },
+      { { -0.5f, -0.5f,  0.5f }, { 0.4f, 0.4f, 1.0f }, { 1.0f, 1.0f } },
+      { { -0.5f,  0.5f,  0.5f }, { 0.4f, 0.4f, 1.0f }, { 1.0f, 0.0f } },
+      { { -0.5f,  0.5f, -0.5f }, { 0.4f, 0.4f, 1.0f }, { 0.0f, 0.0f } },
+
+      { {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 0.4f }, { 0.0f, 1.0f } },
+      { {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 0.4f }, { 1.0f, 1.0f } },
+      { {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 0.4f }, { 1.0f, 0.0f } },
+      { {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 0.4f }, { 0.0f, 0.0f } },
+
+      { { -0.5f,  0.5f,  0.5f }, { 1.0f, 0.4f, 1.0f }, { 0.0f, 1.0f } },
+      { {  0.5f,  0.5f,  0.5f }, { 1.0f, 0.4f, 1.0f }, { 1.0f, 1.0f } },
+      { {  0.5f,  0.5f, -0.5f }, { 1.0f, 0.4f, 1.0f }, { 1.0f, 0.0f } },
+      { { -0.5f,  0.5f, -0.5f }, { 1.0f, 0.4f, 1.0f }, { 0.0f, 0.0f } },
+
+      { { -0.5f, -0.5f, -0.5f }, { 0.4f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+      { {  0.5f, -0.5f, -0.5f }, { 0.4f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+      { {  0.5f, -0.5f,  0.5f }, { 0.4f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+      { { -0.5f, -0.5f,  0.5f }, { 0.4f, 1.0f, 1.0f }, { 0.0f, 0.0f } }
     };
     const uint32_t cubeIndices[] =
     {
       0, 1, 2, 2, 3, 0,
       4, 5, 6, 6, 7, 4,
-      0, 4, 7, 7, 3, 0,
-      1, 5, 6, 6, 2, 1,
-      3, 2, 6, 6, 7, 3,
-      0, 1, 5, 5, 4, 0
+      8, 9, 10, 10, 11, 8,
+      12, 13, 14, 14, 15, 12,
+      16, 17, 18, 18, 19, 16,
+      20, 21, 22, 22, 23, 20
     };
 
     struct MeshSource
@@ -1103,6 +1267,74 @@ namespace sc
     }
 
     sc::log(sc::LogLevel::Info, "Meshes created: %zu", m_meshes.size());
+    return true;
+  }
+
+  bool VkRenderer::createDefaultAssets()
+  {
+    AssetManagerInit ai{};
+    ai.device = m_device;
+    ai.physicalDevice = m_phys;
+    ai.graphicsQueue = m_gfxQueue;
+    ai.commandPool = m_cmdPool;
+    ai.materialDescriptorPool = m_globalDescriptorPool;
+    ai.materialSetLayout = m_materialSetLayout;
+    ai.samplerAnisotropyEnabled = m_samplerAnisotropyEnabled;
+    ai.samplerMaxAnisotropy = m_samplerMaxAnisotropy;
+
+    if (!m_assets.init(ai))
+      return false;
+
+    m_assets.registerMeshAlias("builtin/triangle", 0);
+    m_assets.registerMeshAlias("builtin/cube", 1);
+    m_assets.registerMeshAlias("meshes/triangle", 0);
+    m_assets.registerMeshAlias("meshes/cube", 1);
+
+    const TextureHandle checkerTex = m_assets.loadTexture2D("textures/checker.ppm");
+    const TextureHandle testTex = m_assets.loadTexture2D("textures/test.ppm");
+
+    m_textureOptionLabels.clear();
+    m_textureOptionMaterials.clear();
+
+    MaterialDesc checkerDesc{};
+    checkerDesc.albedo = checkerTex;
+    checkerDesc.unlit = false;
+    checkerDesc.transparent = false;
+    const MaterialHandle checkerMat = m_assets.createMaterial(checkerDesc);
+    if (checkerMat != kInvalidMaterialHandle)
+    {
+      m_textureOptionLabels.push_back("checker.ppm");
+      m_textureOptionMaterials.push_back(checkerMat);
+    }
+
+    MaterialDesc testDesc{};
+    testDesc.albedo = testTex;
+    testDesc.unlit = false;
+    testDesc.transparent = false;
+    const MaterialHandle testMat = m_assets.createMaterial(testDesc);
+    if (testMat != kInvalidMaterialHandle)
+    {
+      m_textureOptionLabels.push_back("test.ppm");
+      m_textureOptionMaterials.push_back(testMat);
+    }
+
+    MaterialDesc unlitDesc{};
+    unlitDesc.unlit = true;
+    const MaterialHandle unlitMat = m_assets.createMaterial(unlitDesc);
+    if (unlitMat != kInvalidMaterialHandle)
+    {
+      m_textureOptionLabels.push_back("Unlit (vertex color)");
+      m_textureOptionMaterials.push_back(unlitMat);
+    }
+
+    if (m_textureOptionMaterials.empty())
+    {
+      sc::log(sc::LogLevel::Error, "No default materials created.");
+      return false;
+    }
+
+    m_sceneTextureSelection = 0;
+    buildAssetUiSnapshot();
     return true;
   }
 
@@ -1180,9 +1412,15 @@ namespace sc
     m_schedSnap = sched;
   }
 
-  void VkRenderer::setDebugWorld(World* world, Entity camera, Entity triangle, Entity root)
+  void VkRenderer::setDebugWorld(World* world, Entity camera, Entity triangle, Entity cube, Entity root)
   {
-    m_debugUI.setWorldContext(world, camera, triangle, root);
+    m_debugUI.setWorldContext(world, camera, triangle, cube, root);
+  }
+
+  void VkRenderer::buildAssetUiSnapshot()
+  {
+    AssetStatsSnapshot stats = m_assets.stats();
+    m_debugUI.setAssetPanelData(stats, m_textureOptionLabels, m_textureOptionMaterials, m_sceneTextureSelection);
   }
 
   float VkRenderer::swapchainAspect() const
@@ -1237,6 +1475,7 @@ namespace sc
     if (!createPipeline()) return false;
     if (!createFramebuffers()) return false;
     if (!createCommands()) return false;
+    m_assets.setCommandContext(m_cmdPool, m_gfxQueue);
 
     m_swapchainDirty = false;
     return true;
@@ -1300,6 +1539,10 @@ namespace sc
     m_debugUI.setFrameStats(m_frameIndex, m_imageIndex, m_swapchainExtent);
     m_debugUI.setTelemetry(m_jobsSnap, m_memSnap);
     m_debugUI.setEcsStats(m_ecsSnap, m_schedSnap);
+    m_sceneTextureSelection = m_debugUI.assetPanelSelection();
+    if (m_sceneTextureSelection >= m_textureOptionMaterials.size())
+      m_sceneTextureSelection = 0;
+    buildAssetUiSnapshot();
     m_debugUI.newFrame();
 
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -1346,15 +1589,61 @@ namespace sc
 
     if (!m_debugUI.isTrianglePaused() && m_renderFrame && !m_renderFrame->draws.empty())
     {
-      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
-      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1,
-                              &m_globalSets[m_frameIndex], 0, nullptr);
-      const GpuMesh* boundMesh = nullptr;
+      std::vector<const DrawItem*> sorted;
+      sorted.reserve(m_renderFrame->draws.size());
       for (const auto& draw : m_renderFrame->draws)
       {
         if (draw.meshId >= m_meshes.size())
           continue;
-        const GpuMesh& mesh = m_meshes[draw.meshId];
+        if (!m_assets.getMaterial(draw.materialId))
+          continue;
+        sorted.push_back(&draw);
+      }
+
+      std::sort(sorted.begin(), sorted.end(),
+                [&](const DrawItem* a, const DrawItem* b)
+      {
+        const Material* ma = m_assets.getMaterial(a->materialId);
+        const Material* mb = m_assets.getMaterial(b->materialId);
+        const uint32_t pa = ma ? static_cast<uint32_t>(ma->pipelineId) : 0u;
+        const uint32_t pb = mb ? static_cast<uint32_t>(mb->pipelineId) : 0u;
+        if (pa != pb) return pa < pb;
+        if (a->materialId != b->materialId) return a->materialId < b->materialId;
+        return a->meshId < b->meshId;
+      });
+
+      const GpuMesh* boundMesh = nullptr;
+      VkPipeline boundPipeline = VK_NULL_HANDLE;
+      MaterialHandle boundMaterial = kInvalidMaterialHandle;
+
+      for (const DrawItem* draw : sorted)
+      {
+        const Material* material = m_assets.getMaterial(draw->materialId);
+        if (!material)
+          continue;
+
+        VkPipeline targetPipeline = (material->pipelineId == PipelineId::UnlitColor) ? m_unlitPipeline : m_texturedPipeline;
+        if (!targetPipeline)
+          continue;
+
+        if (boundPipeline != targetPipeline)
+        {
+          vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, targetPipeline);
+          vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1,
+                                  &m_globalSets[m_frameIndex], 0, nullptr);
+          boundPipeline = targetPipeline;
+          boundMesh = nullptr;
+          boundMaterial = kInvalidMaterialHandle;
+        }
+
+        if (boundMaterial != draw->materialId)
+        {
+          vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 1, 1,
+                                  &material->descriptorSet, 0, nullptr);
+          boundMaterial = draw->materialId;
+        }
+
+        const GpuMesh& mesh = m_meshes[draw->meshId];
         if (mesh.indexCount == 0)
           continue;
 
@@ -1366,7 +1655,7 @@ namespace sc
           boundMesh = &mesh;
         }
 
-        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &draw.model);
+        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &draw->model);
         vkCmdDrawIndexed(cmd, mesh.indexCount, 1, 0, 0, 0);
       }
     }

@@ -123,12 +123,26 @@ namespace sc
     m_schedSnap = sched;
   }
 
-  void DebugUI::setWorldContext(World* world, Entity camera, Entity triangle, Entity root)
+  void DebugUI::setWorldContext(World* world, Entity camera, Entity triangle, Entity cube, Entity root)
   {
     m_world = world;
     m_cameraEntity = camera;
     m_triangleEntity = triangle;
+    m_cubeEntity = cube;
     m_rootEntity = root;
+  }
+
+  void DebugUI::setAssetPanelData(const AssetStatsSnapshot& stats,
+                                  const std::vector<std::string>& labels,
+                                  const std::vector<MaterialHandle>& materialIds,
+                                  uint32_t selectedIndex)
+  {
+    m_assetStats = stats;
+    m_assetLabels = labels;
+    m_assetMaterialIds = materialIds;
+    m_assetSelectedIndex = selectedIndex;
+    if (m_assetSelectedIndex >= m_assetMaterialIds.size())
+      m_assetSelectedIndex = 0;
   }
 
   void DebugUI::newFrame()
@@ -307,6 +321,42 @@ namespace sc
 
       const Mat4& vp = m_world->renderFrame().viewProj;
       ImGui::Text("ViewProj m00/m11/m22: %.2f  %.2f  %.2f", vp.m[0], vp.m[5], vp.m[10]);
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Assets / Materials");
+    ImGui::Text("Textures: %u  Materials: %u  Mesh cache: %u",
+                m_assetStats.textureCount, m_assetStats.materialCount, m_assetStats.meshCount);
+    ImGui::Text("CPU bytes: %llu  GPU bytes(est): %llu",
+                static_cast<unsigned long long>(m_assetStats.cpuBytes),
+                static_cast<unsigned long long>(m_assetStats.gpuBytes));
+    ImGui::Text("Texture cache H/M: %llu / %llu",
+                static_cast<unsigned long long>(m_assetStats.textureCacheHits),
+                static_cast<unsigned long long>(m_assetStats.textureCacheMisses));
+    ImGui::Text("Material cache H/M: %llu / %llu",
+                static_cast<unsigned long long>(m_assetStats.materialCacheHits),
+                static_cast<unsigned long long>(m_assetStats.materialCacheMisses));
+    ImGui::Text("Sampler anisotropy: %s (max %.1f)",
+                m_assetStats.samplerAnisotropyEnabled ? "ON" : "OFF",
+                m_assetStats.samplerMaxAnisotropy);
+
+    if (!m_assetLabels.empty() && m_assetLabels.size() == m_assetMaterialIds.size())
+    {
+      std::vector<const char*> itemPtrs;
+      itemPtrs.reserve(m_assetLabels.size());
+      for (const std::string& label : m_assetLabels)
+        itemPtrs.push_back(label.c_str());
+
+      int comboIndex = static_cast<int>(m_assetSelectedIndex);
+      if (ImGui::Combo("Scene Texture", &comboIndex, itemPtrs.data(), static_cast<int>(itemPtrs.size())))
+      {
+        m_assetSelectedIndex = static_cast<uint32_t>(comboIndex);
+        const MaterialHandle selectedMaterial = m_assetMaterialIds[m_assetSelectedIndex];
+        if (RenderMesh* triMesh = m_world ? m_world->get<RenderMesh>(m_triangleEntity) : nullptr)
+          triMesh->materialId = selectedMaterial;
+        if (RenderMesh* cubeMesh = m_world ? m_world->get<RenderMesh>(m_cubeEntity) : nullptr)
+          cubeMesh->materialId = selectedMaterial;
+      }
     }
     ImGui::End();
   }

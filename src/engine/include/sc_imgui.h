@@ -1,12 +1,15 @@
 #pragma once
 #include <vulkan/vulkan.h>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #include "sc_jobs.h"
 #include "sc_memtrack.h"
 #include "sc_ecs.h"
 #include "sc_debug_draw.h"
 #include "sc_scheduler.h"
+#include "sc_assets.h"
 
 struct SDL_Window;
 union SDL_Event;
@@ -37,8 +40,13 @@ namespace sc
     void setTelemetry(const JobsTelemetrySnapshot& jobs, const MemStats& mem);
     void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
     bool isTrianglePaused() const { return m_pauseTriangle; }
-    void setWorldContext(World* world, Entity camera, Entity triangle, Entity root);
+    void setWorldContext(World* world, Entity camera, Entity triangle, Entity cube, Entity root);
     void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; }
+    void setAssetPanelData(const AssetStatsSnapshot& stats,
+                           const std::vector<std::string>& labels,
+                           const std::vector<MaterialHandle>& materialIds,
+                           uint32_t selectedIndex);
+    uint32_t assetPanelSelection() const { return m_assetSelectedIndex; }
 
   private:
     bool createDescriptorPool();
@@ -79,7 +87,13 @@ namespace sc
     World* m_world = nullptr;
     Entity m_cameraEntity = kInvalidEntity;
     Entity m_triangleEntity = kInvalidEntity;
+    Entity m_cubeEntity = kInvalidEntity;
     Entity m_rootEntity = kInvalidEntity;
     DebugDraw* m_debugDraw = nullptr;
+
+    AssetStatsSnapshot m_assetStats{};
+    std::vector<std::string> m_assetLabels;
+    std::vector<MaterialHandle> m_assetMaterialIds;
+    uint32_t m_assetSelectedIndex = 0;
   };
 }

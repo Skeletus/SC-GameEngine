@@ -3,6 +3,7 @@ add_library(sc_engine STATIC)
 target_sources(sc_engine
   PRIVATE
     src/sc_app.cpp
+    src/sc_assets.cpp
     src/sc_debug_draw.cpp
     src/sc_imgui.cpp
     src/sc_vk.cpp
@@ -11,6 +12,7 @@ target_sources(sc_engine
 target_include_directories(sc_engine
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/third_party
 )
 
 target_link_libraries(sc_engine

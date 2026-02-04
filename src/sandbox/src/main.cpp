@@ -103,7 +103,7 @@ int main()
     vk.setTelemetry(jobs.getTelemetrySnapshot(), sc::memtrack_snapshot());
     vk.setEcsStats(world.statsSnapshot(), scheduler.statsSnapshot());
     vk.setRenderFrame(&world.renderFrame());
-    vk.setDebugWorld(&world, spawner.camera, spawner.triangle, spawner.root);
+    vk.setDebugWorld(&world, spawner.camera, spawner.triangle, spawner.cube, spawner.root);
     vk.setDebugDraw(&debugDraw);
 
     if (vk.beginFrame())

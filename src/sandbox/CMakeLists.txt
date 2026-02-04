@@ -20,3 +20,12 @@ endif()
 target_compile_definitions(sc_sandbox PRIVATE SDL_MAIN_HANDLED)
 
 sc_compile_shaders(sc_sandbox)
+
+add_custom_command(
+  TARGET sc_sandbox
+  POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_SOURCE_DIR}/assets"
+          "$<TARGET_FILE_DIR:sc_sandbox>/assets"
+  COMMENT "Copying runtime assets folder"
+)

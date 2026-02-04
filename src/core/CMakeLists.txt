@@ -8,6 +8,7 @@ target_sources(sc_core
     src/sc_time.cpp
     src/sc_jobs.cpp
     src/sc_math.cpp
+    src/sc_paths.cpp
     src/sc_ecs.cpp
     src/sc_scheduler.cpp
 )

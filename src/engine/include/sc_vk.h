@@ -3,8 +3,10 @@
 #include <vector>
 #include <cstdint>
 #include <cstddef>
+#include <string>
 
 #include "sc_imgui.h"
+#include "sc_assets.h"
 
 struct SDL_Window;
 union SDL_Event;
@@ -12,12 +14,13 @@ union SDL_Event;
 namespace sc
 {
   struct RenderFrameData;
-  struct DebugDraw;
+  class DebugDraw;
 
   struct MeshVertex
   {
     float pos[3]{};
     float color[3]{};
+    float uv[2]{};
   };
 
   struct GpuMesh
@@ -55,8 +58,10 @@ namespace sc
     void setTelemetry(const JobsTelemetrySnapshot& jobs, const MemStats& mem);
     void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
     void setRenderFrame(const RenderFrameData* frame) { m_renderFrame = frame; }
-    void setDebugWorld(World* world, Entity camera, Entity triangle, Entity root);
+    void setDebugWorld(World* world, Entity camera, Entity triangle, Entity cube, Entity root);
     void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; m_debugUI.setDebugDraw(draw); }
+    AssetManager& assets() { return m_assets; }
+    const AssetManager& assets() const { return m_assets; }
 
     float swapchainAspect() const;
 
@@ -90,6 +95,8 @@ namespace sc
     bool createUniformBuffers();
     bool createDescriptorPool();
     bool allocateDescriptorSets();
+    bool createDefaultAssets();
+    void buildAssetUiSnapshot();
     void destroyUniformBuffers();
     VkFormat findDepthFormat() const;
 
@@ -124,9 +131,11 @@ namespace sc
 
     // Pipeline
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkPipeline m_unlitPipeline = VK_NULL_HANDLE;
+    VkPipeline m_texturedPipeline = VK_NULL_HANDLE;
     VkPipeline m_debugPipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_globalSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_materialSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_globalDescriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet m_globalSets[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     VkBuffer m_cameraBuffers[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
@@ -156,6 +165,12 @@ namespace sc
     DebugDraw* m_debugDraw = nullptr;
 
     std::vector<GpuMesh> m_meshes;
+    AssetManager m_assets{};
+    std::vector<std::string> m_textureOptionLabels;
+    std::vector<MaterialHandle> m_textureOptionMaterials;
+    uint32_t m_sceneTextureSelection = 0;
+    bool m_samplerAnisotropyEnabled = false;
+    float m_samplerMaxAnisotropy = 1.0f;
 
     VkBuffer m_debugVertexBuffers[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     VkDeviceMemory m_debugVertexMemory[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };

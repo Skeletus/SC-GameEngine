@@ -341,7 +341,11 @@ namespace sc
         setParent(t, state->root);
         setLocalPosition(t, 0.0f, 0.0f, 2.0f);
       }
-      world.add<RenderMesh>(state->triangle).meshId = 0;
+      {
+        RenderMesh& rm = world.add<RenderMesh>(state->triangle);
+        rm.meshId = 0;
+        rm.materialId = 0;
+      }
       setName(world.add<Name>(state->triangle), "TriangleEntity");
 
       state->cube = world.create();
@@ -350,7 +354,11 @@ namespace sc
         setParent(t, state->root);
         setLocalPosition(t, 0.0f, 0.0f, 0.0f);
       }
-      world.add<RenderMesh>(state->cube).meshId = 1;
+      {
+        RenderMesh& rm = world.add<RenderMesh>(state->cube);
+        rm.meshId = 1;
+        rm.materialId = 0;
+      }
       setName(world.add<Name>(state->cube), "CubeEntity");
 
       for (uint32_t i = 0; i < state->spawnCount; ++i)
