@@ -1,5 +1,7 @@
 add_executable(sc_sandbox)
 
+include(SCShaders)
+
 target_sources(sc_sandbox
   PRIVATE
     src/main.cpp
@@ -16,3 +18,5 @@ endif()
 
 # On Windows, SDL2 sometimes needs this for a console app.
 target_compile_definitions(sc_sandbox PRIVATE SDL_MAIN_HANDLED)
+
+sc_compile_shaders(sc_sandbox)

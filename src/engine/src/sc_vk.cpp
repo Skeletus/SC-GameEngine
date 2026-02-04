@@ -11,6 +11,20 @@
 
 namespace sc
 {
+  struct CameraUbo
+  {
+    Mat4 viewProj{};
+  };
+
+  static uint32_t findMemoryType(VkPhysicalDevice phys, uint32_t typeFilter, VkMemoryPropertyFlags properties);
+  static bool createBuffer(VkDevice device,
+                           VkPhysicalDevice phys,
+                           VkDeviceSize size,
+                           VkBufferUsageFlags usage,
+                           VkMemoryPropertyFlags properties,
+                           VkBuffer& buffer,
+                           VkDeviceMemory& memory);
+
   // ---- debug messenger helpers ----
   static VKAPI_ATTR VkBool32 VKAPI_CALL vkDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -56,6 +70,10 @@ namespace sc
     if (!createDevice()) return false;
     if (!createSwapchain()) return false;
     if (!createRenderPass()) return false;
+    if (!createDescriptorSetLayout()) return false;
+    if (!createUniformBuffers()) return false;
+    if (!createDescriptorPool()) return false;
+    if (!allocateDescriptorSets()) return false;
     if (m_cfg.enableDebugUI)
     {
       if (!m_debugUI.init(m_window, m_instance, m_device, m_phys, m_gfxFamily, m_gfxQueue, m_renderPass, (uint32_t)m_swapchainImages.size())) return false;
@@ -85,6 +103,10 @@ namespace sc
     destroySwapchainObjects();
     destroyPipeline();
     m_debugUI.shutdown();
+
+    destroyUniformBuffers();
+    if (m_globalDescriptorPool) { vkDestroyDescriptorPool(m_device, m_globalDescriptorPool, nullptr); m_globalDescriptorPool = VK_NULL_HANDLE; }
+    if (m_globalSetLayout) { vkDestroyDescriptorSetLayout(m_device, m_globalSetLayout, nullptr); m_globalSetLayout = VK_NULL_HANDLE; }
 
     if (m_renderPass) vkDestroyRenderPass(m_device, m_renderPass, nullptr);
 
@@ -442,6 +464,165 @@ namespace sc
     return module;
   }
 
+  bool VkRenderer::createDescriptorSetLayout()
+  {
+    VkDescriptorSetLayoutBinding camBinding{};
+    camBinding.binding = 0;
+    camBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    camBinding.descriptorCount = 1;
+    camBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkDescriptorSetLayoutCreateInfo ci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    ci.bindingCount = 1;
+    ci.pBindings = &camBinding;
+
+    VkResult r = vkCreateDescriptorSetLayout(m_device, &ci, nullptr, &m_globalSetLayout);
+    if (r != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkCreateDescriptorSetLayout failed (%d)", (int)r);
+      return false;
+    }
+    return true;
+  }
+
+  bool VkRenderer::createUniformBuffers()
+  {
+    const VkDeviceSize size = sizeof(CameraUbo);
+
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i)
+    {
+      if (!createBuffer(m_device, m_phys, size,
+                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        m_cameraBuffers[i], m_cameraMemory[i]))
+      {
+        sc::log(sc::LogLevel::Error, "createBuffer (camera UBO) failed.");
+        return false;
+      }
+
+      if (vkMapMemory(m_device, m_cameraMemory[i], 0, size, 0, &m_cameraMapped[i]) != VK_SUCCESS)
+      {
+        sc::log(sc::LogLevel::Error, "vkMapMemory (camera UBO) failed.");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool VkRenderer::createDescriptorPool()
+  {
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSize.descriptorCount = MAX_FRAMES;
+
+    VkDescriptorPoolCreateInfo pci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    pci.maxSets = MAX_FRAMES;
+    pci.poolSizeCount = 1;
+    pci.pPoolSizes = &poolSize;
+
+    VkResult r = vkCreateDescriptorPool(m_device, &pci, nullptr, &m_globalDescriptorPool);
+    if (r != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkCreateDescriptorPool failed (%d)", (int)r);
+      return false;
+    }
+    return true;
+  }
+
+  bool VkRenderer::allocateDescriptorSets()
+  {
+    VkDescriptorSetLayout layouts[MAX_FRAMES] = { m_globalSetLayout, m_globalSetLayout };
+    VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    ai.descriptorPool = m_globalDescriptorPool;
+    ai.descriptorSetCount = MAX_FRAMES;
+    ai.pSetLayouts = layouts;
+
+    VkResult r = vkAllocateDescriptorSets(m_device, &ai, m_globalSets);
+    if (r != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkAllocateDescriptorSets failed (%d)", (int)r);
+      return false;
+    }
+
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i)
+    {
+      VkDescriptorBufferInfo bi{};
+      bi.buffer = m_cameraBuffers[i];
+      bi.offset = 0;
+      bi.range = sizeof(CameraUbo);
+
+      VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+      write.dstSet = m_globalSets[i];
+      write.dstBinding = 0;
+      write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+      write.descriptorCount = 1;
+      write.pBufferInfo = &bi;
+
+      vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+    }
+    return true;
+  }
+
+  void VkRenderer::destroyUniformBuffers()
+  {
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i)
+    {
+      if (m_cameraMapped[i])
+      {
+        vkUnmapMemory(m_device, m_cameraMemory[i]);
+        m_cameraMapped[i] = nullptr;
+      }
+      if (m_cameraBuffers[i]) { vkDestroyBuffer(m_device, m_cameraBuffers[i], nullptr); m_cameraBuffers[i] = VK_NULL_HANDLE; }
+      if (m_cameraMemory[i]) { vkFreeMemory(m_device, m_cameraMemory[i], nullptr); m_cameraMemory[i] = VK_NULL_HANDLE; }
+    }
+  }
+
+  static uint32_t findMemoryType(VkPhysicalDevice phys, uint32_t typeFilter, VkMemoryPropertyFlags properties)
+  {
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(phys, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+    {
+      if ((typeFilter & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & properties) == properties)
+        return i;
+    }
+    return UINT32_MAX;
+  }
+
+  static bool createBuffer(VkDevice device,
+                           VkPhysicalDevice phys,
+                           VkDeviceSize size,
+                           VkBufferUsageFlags usage,
+                           VkMemoryPropertyFlags properties,
+                           VkBuffer& buffer,
+                           VkDeviceMemory& memory)
+  {
+    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size = size;
+    bci.usage = usage;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateBuffer(device, &bci, nullptr, &buffer) != VK_SUCCESS)
+      return false;
+
+    VkMemoryRequirements memReq{};
+    vkGetBufferMemoryRequirements(device, buffer, &memReq);
+
+    const uint32_t typeIndex = findMemoryType(phys, memReq.memoryTypeBits, properties);
+    if (typeIndex == UINT32_MAX)
+      return false;
+
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = memReq.size;
+    mai.memoryTypeIndex = typeIndex;
+
+    if (vkAllocateMemory(device, &mai, nullptr, &memory) != VK_SUCCESS)
+      return false;
+
+    vkBindBufferMemory(device, buffer, memory, 0);
+    return true;
+  }
+
   bool VkRenderer::createPipeline()
   {
     const char* vsPath = "shaders/triangle.vert.spv";
@@ -509,7 +690,16 @@ namespace sc
     dyn.dynamicStateCount = (uint32_t)(sizeof(dynStates) / sizeof(dynStates[0]));
     dyn.pDynamicStates = dynStates;
 
+    VkPushConstantRange pcr{};
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcr.offset = 0;
+    pcr.size = sizeof(Mat4);
+
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &m_globalSetLayout;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pcr;
     VkResult lr = vkCreatePipelineLayout(m_device, &plci, nullptr, &m_pipelineLayout);
     if (lr != VK_SUCCESS)
     {
@@ -638,6 +828,18 @@ namespace sc
     m_schedSnap = sched;
   }
 
+  void VkRenderer::setDebugWorld(World* world, Entity camera, Entity triangle, Entity root)
+  {
+    m_debugUI.setWorldContext(world, camera, triangle, root);
+  }
+
+  float VkRenderer::swapchainAspect() const
+  {
+    if (m_swapchainExtent.height == 0)
+      return 1.0f;
+    return (float)m_swapchainExtent.width / (float)m_swapchainExtent.height;
+  }
+
 
   void VkRenderer::destroySwapchainObjects()
   {
@@ -684,6 +886,17 @@ namespace sc
 
   bool VkRenderer::beginFrame()
   {
+
+    static bool once = false;
+    if (!once)
+    {
+      once = true;
+      sc::log(sc::LogLevel::Info, "renderFrame=%p draws=%zu",
+              (void*)m_renderFrame,
+              (m_renderFrame ? m_renderFrame->draws.size() : 0));
+    }
+
+
     // 0) Si resize/present marcó dirty, recrear primero (no tocar fences ni acquire)
     if (m_swapchainDirty)
     {
@@ -762,12 +975,21 @@ namespace sc
     scissor.extent = m_swapchainExtent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    if (!m_debugUI.isTrianglePaused() && m_drawList && !m_drawList->draws.empty())
+    if (m_renderFrame && m_cameraMapped[m_frameIndex])
+    {
+      CameraUbo ubo{};
+      ubo.viewProj = m_renderFrame->viewProj;
+      std::memcpy(m_cameraMapped[m_frameIndex], &ubo, sizeof(ubo));
+    }
+
+    if (!m_debugUI.isTrianglePaused() && m_renderFrame && !m_renderFrame->draws.empty())
     {
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
-      for (const auto& draw : m_drawList->draws)
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1,
+                              &m_globalSets[m_frameIndex], 0, nullptr);
+      for (const auto& draw : m_renderFrame->draws)
       {
-        (void)draw;
+        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &draw.model);
         vkCmdDraw(cmd, 3, 1, 0, 0);
       }
     }

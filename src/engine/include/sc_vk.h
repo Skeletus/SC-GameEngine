@@ -10,7 +10,7 @@ union SDL_Event;
 
 namespace sc
 {
-  struct RenderQueue;
+  struct RenderFrameData;
 
   struct VkConfig
   {
@@ -37,7 +37,10 @@ namespace sc
     void endFrame();
     void setTelemetry(const JobsTelemetrySnapshot& jobs, const MemStats& mem);
     void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
-    void setDrawList(const RenderQueue* list) { m_drawList = list; }
+    void setRenderFrame(const RenderFrameData* frame) { m_renderFrame = frame; }
+    void setDebugWorld(World* world, Entity camera, Entity triangle, Entity root);
+
+    float swapchainAspect() const;
 
   private:
     bool createInstance();
@@ -59,6 +62,12 @@ namespace sc
 
     std::vector<uint8_t> readFile(const char* path);
     VkShaderModule createShaderModule(const std::vector<uint8_t>& code);
+
+    bool createDescriptorSetLayout();
+    bool createUniformBuffers();
+    bool createDescriptorPool();
+    bool allocateDescriptorSets();
+    void destroyUniformBuffers();
 
   private:
     VkConfig m_cfg{};
@@ -88,6 +97,12 @@ namespace sc
     // Pipeline
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_globalSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_globalDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_globalSets[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkBuffer m_cameraBuffers[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDeviceMemory m_cameraMemory[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    void* m_cameraMapped[MAX_FRAMES] = { nullptr, nullptr };
 
     // Commands
     VkCommandPool m_cmdPool = VK_NULL_HANDLE;
@@ -108,6 +123,6 @@ namespace sc
     MemStats m_memSnap{};
     EcsStatsSnapshot m_ecsSnap{};
     SchedulerStatsSnapshot m_schedSnap{};
-    const RenderQueue* m_drawList = nullptr;
+    const RenderFrameData* m_renderFrame = nullptr;
   };
 }

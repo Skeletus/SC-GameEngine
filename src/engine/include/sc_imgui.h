@@ -36,6 +36,7 @@ namespace sc
     void setTelemetry(const JobsTelemetrySnapshot& jobs, const MemStats& mem);
     void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
     bool isTrianglePaused() const { return m_pauseTriangle; }
+    void setWorldContext(World* world, Entity camera, Entity triangle, Entity root);
 
   private:
     bool createDescriptorPool();
@@ -72,5 +73,10 @@ namespace sc
     MemStats m_memSnap{};
     EcsStatsSnapshot m_ecsSnap{};
     SchedulerStatsSnapshot m_schedSnap{};
+
+    World* m_world = nullptr;
+    Entity m_cameraEntity = kInvalidEntity;
+    Entity m_triangleEntity = kInvalidEntity;
+    Entity m_rootEntity = kInvalidEntity;
   };
 }

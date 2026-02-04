@@ -96,7 +96,7 @@ namespace sc
     {
       if (p) p->reserve(count);
     }
-    m_renderQueue.reserve(count);
+    m_renderFrame.reserve(count);
   }
 
   void World::publishStats(const EcsStatsSnapshot& snap)
@@ -118,34 +118,178 @@ namespace sc
   void TransformSystem(World& world, float dt, void* user)
   {
     (void)dt; (void)user;
-    world.ForEach<Transform>([](Entity, Transform& t)
+
+    std::vector<Entity> entities;
+    world.ForEach<Transform>([&](Entity e, Transform&)
     {
-      if (t.scale[0] == 0.0f && t.scale[1] == 0.0f && t.scale[2] == 0.0f)
+      entities.push_back(e);
+    });
+
+    if (entities.empty())
+      return;
+
+    uint32_t maxIndex = 0;
+    for (const Entity e : entities)
+      maxIndex = (e.index() > maxIndex) ? e.index() : maxIndex;
+
+    std::vector<std::vector<Entity>> children(maxIndex + 1u);
+    std::vector<Entity> roots;
+    roots.reserve(entities.size());
+
+    for (const Entity e : entities)
+    {
+      Transform& t = *world.get<Transform>(e);
+
+      if (t.localScale[0] == 0.0f && t.localScale[1] == 0.0f && t.localScale[2] == 0.0f)
       {
-        t.scale[0] = 1.0f;
-        t.scale[1] = 1.0f;
-        t.scale[2] = 1.0f;
+        t.localScale[0] = 1.0f;
+        t.localScale[1] = 1.0f;
+        t.localScale[2] = 1.0f;
+        t.dirty = true;
+      }
+
+      bool validParent = isValidEntity(t.parent) && t.parent != e &&
+                         world.isAlive(t.parent) && world.has<Transform>(t.parent);
+
+      if (!validParent)
+      {
+        if (isValidEntity(t.parent))
+          t.dirty = true;
+        t.parent = kInvalidEntity;
+        roots.push_back(e);
+      }
+      else
+      {
+        children[t.parent.index()].push_back(e);
+      }
+    }
+
+    struct StackItem
+    {
+      Entity e{};
+      bool parentDirty = false;
+    };
+
+    std::vector<StackItem> stack;
+    stack.reserve(entities.size());
+    for (const Entity r : roots)
+      stack.push_back({ r, false });
+
+    while (!stack.empty())
+    {
+      const StackItem item = stack.back();
+      stack.pop_back();
+
+      Transform& t = *world.get<Transform>(item.e);
+      const bool nodeDirty = t.dirty || item.parentDirty;
+
+      if (nodeDirty)
+      {
+        const Mat4 local = mat4_trs(t.localPos, t.localRot, t.localScale);
+        if (isValidEntity(t.parent))
+        {
+          Transform* pt = world.get<Transform>(t.parent);
+          if (pt)
+            t.worldMatrix = mat4_mul(pt->worldMatrix, local);
+          else
+            t.worldMatrix = local;
+        }
+        else
+        {
+          t.worldMatrix = local;
+        }
+        t.dirty = false;
+      }
+
+      const uint32_t idx = item.e.index();
+      if (idx < children.size())
+      {
+        for (const Entity c : children[idx])
+          stack.push_back({ c, nodeDirty });
+      }
+    }
+  }
+
+  void CameraSystem(World& world, float dt, void* user)
+  {
+    (void)dt;
+    CameraSystemState* state = static_cast<CameraSystemState*>(user);
+    if (!state || !state->frame)
+      return;
+
+    RenderFrameData& frame = *state->frame;
+
+    Camera* activeCam = nullptr;
+    Transform* camXform = nullptr;
+    Entity activeEntity = kInvalidEntity;
+
+    Camera* fallbackCam = nullptr;
+    Transform* fallbackXform = nullptr;
+    Entity fallbackEntity = kInvalidEntity;
+
+    world.ForEach<Camera, Transform>([&](Entity e, Camera& cam, Transform& tr)
+    {
+      if (!fallbackCam)
+      {
+        fallbackCam = &cam;
+        fallbackXform = &tr;
+        fallbackEntity = e;
+      }
+
+      if (!activeCam && cam.active)
+      {
+        activeCam = &cam;
+        camXform = &tr;
+        activeEntity = e;
       }
     });
+
+    if (!activeCam && fallbackCam)
+    {
+      activeCam = fallbackCam;
+      camXform = fallbackXform;
+      activeEntity = fallbackEntity;
+    }
+
+    if (!activeCam)
+    {
+      frame.viewProj = Mat4::identity();
+      state->activeCamera = kInvalidEntity;
+      return;
+    }
+
+    activeCam->aspect = (state->aspect > 0.0f) ? state->aspect : activeCam->aspect;
+
+    const float fovRad = activeCam->fovY * 3.1415926535f / 180.0f;
+    const Mat4 proj = mat4_perspective_rh_zo(fovRad, activeCam->aspect, activeCam->nearZ, activeCam->farZ, true);
+
+    // Conventions: right-handed, camera looks along -Z in view space, depth 0..1 (Vulkan).
+    // We flip Y in the projection to keep +Y up in world space.
+    const Mat4 view = camXform ? mat4_inverse(camXform->worldMatrix) : Mat4::identity();
+
+    frame.viewProj = mat4_mul(proj, view);
+    state->activeCamera = activeEntity;
   }
 
   void RenderPrepSystem(World& world, float dt, void* user)
   {
     (void)dt;
     RenderPrepState* state = static_cast<RenderPrepState*>(user);
-    if (!state || !state->queue)
+    if (!state || !state->frame)
       return;
 
-    RenderQueue& q = *state->queue;
-    q.clear();
+    RenderFrameData& frame = *state->frame;
+    frame.clear();
 
-    world.ForEach<Transform, RenderMesh>([&](Entity e, Transform&, RenderMesh& rm)
+    world.ForEach<Transform, RenderMesh>([&](Entity e, Transform& t, RenderMesh& rm)
     {
-      DrawCommand cmd{};
+      DrawItem cmd{};
       cmd.entity = e;
       cmd.meshId = rm.meshId;
       cmd.materialId = rm.materialId;
-      q.draws.push_back(cmd);
+      cmd.model = t.worldMatrix;
+
+      frame.draws.push_back(cmd);
     });
   }
 
@@ -173,9 +317,30 @@ namespace sc
     {
       state->active.reserve(state->spawnCount);
 
+      // Camera entity
+      state->camera = world.create();
+      {
+        Transform& t = world.add<Transform>(state->camera);
+        setLocalPosition(t, 0.0f, 0.0f, 5.0f);
+        Camera& cam = world.add<Camera>(state->camera);
+        cam.active = true;
+        setName(world.add<Name>(state->camera), "MainCamera");
+      }
+
       // Triangle entity (RenderMesh)
+      state->root = world.create();
+      {
+        Transform& t = world.add<Transform>(state->root);
+        setLocalPosition(t, 0.0f, 0.0f, 0.0f);
+        setName(world.add<Name>(state->root), "Root");
+      }
+
       state->triangle = world.create();
-      world.add<Transform>(state->triangle);
+      {
+        Transform& t = world.add<Transform>(state->triangle);
+        setParent(t, state->root);
+        setLocalPosition(t, 0.0f, 0.0f, 2.0f);
+      }
       world.add<RenderMesh>(state->triangle).meshId = 0;
       setName(world.add<Name>(state->triangle), "TriangleEntity");
 

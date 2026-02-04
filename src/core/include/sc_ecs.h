@@ -4,6 +4,8 @@
 #include <atomic>
 #include <type_traits>
 
+#include "sc_math.h"
+
 namespace sc
 {
   // --------------------
@@ -31,6 +33,9 @@ namespace sc
     bool operator!=(const Entity& o) const { return value != o.value; }
   };
 
+  static constexpr Entity kInvalidEntity{ 0xFFFFFFFFu };
+  inline bool isValidEntity(Entity e) { return e.value != kInvalidEntity.value; }
+
   // --------------------
   // Entity Manager
   // --------------------
@@ -57,16 +62,46 @@ namespace sc
   // --------------------
   struct Transform
   {
-    float position[3] = { 0.0f, 0.0f, 0.0f };
-    float rotation[3] = { 0.0f, 0.0f, 0.0f };
-    float scale[3]    = { 1.0f, 1.0f, 1.0f };
+    Entity parent = kInvalidEntity;
+    float localPos[3] = { 0.0f, 0.0f, 0.0f };
+    float localRot[3] = { 0.0f, 0.0f, 0.0f }; // radians
+    float localScale[3] = { 1.0f, 1.0f, 1.0f };
+    Mat4 worldMatrix = Mat4::identity();
+    bool dirty = true;
   };
+
+  inline void markDirty(Transform& t)
+  {
+    t.dirty = true;
+  }
+
+  inline void setLocal(Transform& t, const float pos[3], const float rot[3], const float scale[3])
+  {
+    t.localPos[0] = pos[0]; t.localPos[1] = pos[1]; t.localPos[2] = pos[2];
+    t.localRot[0] = rot[0]; t.localRot[1] = rot[1]; t.localRot[2] = rot[2];
+    t.localScale[0] = scale[0]; t.localScale[1] = scale[1]; t.localScale[2] = scale[2];
+    t.dirty = true;
+  }
+
+  inline void setParent(Transform& t, Entity parent)
+  {
+    t.parent = (parent == t.parent) ? t.parent : parent;
+    t.dirty = true;
+  }
+
+  inline void setLocalPosition(Transform& t, float x, float y, float z)
+  {
+    t.localPos[0] = x; t.localPos[1] = y; t.localPos[2] = z;
+    t.dirty = true;
+  }
 
   struct Camera
   {
-    float fov = 60.0f;
-    float nearPlane = 0.1f;
-    float farPlane = 1000.0f;
+    float fovY = 60.0f;
+    float nearZ = 0.1f;
+    float farZ = 1000.0f;
+    float aspect = 16.0f / 9.0f;
+    bool active = false;
   };
 
   struct RenderMesh
@@ -86,16 +121,18 @@ namespace sc
   // --------------------
   // Render queue (CPU-side)
   // --------------------
-  struct DrawCommand
+  struct DrawItem
   {
     Entity entity{};
     uint32_t meshId = 0;
     uint32_t materialId = 0;
+    Mat4 model = Mat4::identity();
   };
 
-  struct RenderQueue
+  struct RenderFrameData
   {
-    std::vector<DrawCommand> draws;
+    Mat4 viewProj = Mat4::identity();
+    std::vector<DrawItem> draws;
     void clear() { draws.clear(); }
     void reserve(uint32_t count) { draws.reserve(count); }
   };
@@ -257,8 +294,8 @@ namespace sc
     uint32_t entityAliveCount() const { return m_entities.aliveCount(); }
     uint32_t entityCapacity() const { return m_entities.capacity(); }
 
-    RenderQueue& renderQueue() { return m_renderQueue; }
-    const RenderQueue& renderQueue() const { return m_renderQueue; }
+    RenderFrameData& renderFrame() { return m_renderFrame; }
+    const RenderFrameData& renderFrame() const { return m_renderFrame; }
 
     void publishStats(const EcsStatsSnapshot& snap);
     EcsStatsSnapshot statsSnapshot() const;
@@ -339,7 +376,7 @@ namespace sc
     EntityManager m_entities;
     std::vector<IComponentPool*> m_pools;
 
-    RenderQueue m_renderQueue;
+    RenderFrameData m_renderFrame;
 
     EcsStatsSnapshot m_stats[2]{};
     std::atomic<uint32_t> m_statsIndex{ 0 };
@@ -357,14 +394,24 @@ namespace sc
     uint32_t churnCount = 8;
     std::vector<Entity> active;
     Entity triangle{};
+    Entity camera{};
+    Entity root{};
   };
 
   struct RenderPrepState
   {
-    RenderQueue* queue = nullptr;
+    RenderFrameData* frame = nullptr;
+  };
+
+  struct CameraSystemState
+  {
+    RenderFrameData* frame = nullptr;
+    Entity activeCamera = kInvalidEntity;
+    float aspect = 16.0f / 9.0f;
   };
 
   void TransformSystem(World& world, float dt, void* user);
+  void CameraSystem(World& world, float dt, void* user);
   void RenderPrepSystem(World& world, float dt, void* user);
   void DebugSystem(World& world, float dt, void* user);
   void SpawnerSystem(World& world, float dt, void* user);

@@ -53,7 +53,7 @@ int main()
 
   sc::World world;
   world.reserveEntities(1024);
-  world.renderQueue().reserve(1024);
+  world.renderFrame().reserve(1024);
 
   sc::Scheduler scheduler;
 
@@ -63,11 +63,15 @@ int main()
   spawner.churnCount = 8;
 
   sc::RenderPrepState renderPrep{};
-  renderPrep.queue = &world.renderQueue();
+  renderPrep.frame = &world.renderFrame();
+
+  sc::CameraSystemState cameraState{};
+  cameraState.frame = &world.renderFrame();
 
   scheduler.addSystem("Spawner", sc::SystemPhase::Simulation, sc::SpawnerSystem, &spawner);
   scheduler.addSystem("Transform", sc::SystemPhase::Simulation, sc::TransformSystem, nullptr, { "Spawner" });
-  scheduler.addSystem("RenderPrep", sc::SystemPhase::RenderPrep, sc::RenderPrepSystem, &renderPrep, { "Transform" });
+  scheduler.addSystem("Camera", sc::SystemPhase::Simulation, sc::CameraSystem, &cameraState, { "Transform" });
+  scheduler.addSystem("RenderPrep", sc::SystemPhase::RenderPrep, sc::RenderPrepSystem, &renderPrep, { "Camera" });
   scheduler.addSystem("Debug", sc::SystemPhase::Render, sc::DebugSystem, nullptr, { "RenderPrep" });
   scheduler.finalize();
 
@@ -87,12 +91,14 @@ int main()
     const float dt = (float)sc::ticksToSeconds(now - lastTicks);
     lastTicks = now;
 
+    cameraState.aspect = vk.swapchainAspect();
     scheduler.tick(world, dt);
     jobs.publishFrameTelemetry();
 
     vk.setTelemetry(jobs.getTelemetrySnapshot(), sc::memtrack_snapshot());
     vk.setEcsStats(world.statsSnapshot(), scheduler.statsSnapshot());
-    vk.setDrawList(&world.renderQueue());
+    vk.setRenderFrame(&world.renderFrame());
+    vk.setDebugWorld(&world, spawner.camera, spawner.triangle, spawner.root);
 
     if (vk.beginFrame())
       vk.endFrame();

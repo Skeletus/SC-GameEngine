@@ -8,6 +8,7 @@
 #include <backends/imgui_impl_vulkan.h>
 
 #include <cstring>
+#include <vector>
 
 namespace sc
 {
@@ -122,6 +123,14 @@ namespace sc
     m_schedSnap = sched;
   }
 
+  void DebugUI::setWorldContext(World* world, Entity camera, Entity triangle, Entity root)
+  {
+    m_world = world;
+    m_cameraEntity = camera;
+    m_triangleEntity = triangle;
+    m_rootEntity = root;
+  }
+
   void DebugUI::newFrame()
   {
     if (!m_initialized)
@@ -190,6 +199,102 @@ namespace sc
     {
       const auto& e = m_schedSnap.entries[i];
       ImGui::BulletText("%s (P%u): %.3f ms", e.name ? e.name : "(null)", (uint32_t)e.phase, e.ms);
+    }
+
+    if (m_world)
+    {
+      ImGui::Separator();
+      ImGui::Text("Scene");
+
+      if (Transform* camT = m_world->get<Transform>(m_cameraEntity))
+      {
+        float pos[3] = { camT->localPos[0], camT->localPos[1], camT->localPos[2] };
+        if (ImGui::DragFloat3("Camera Pos", pos, 0.05f))
+        {
+          setLocalPosition(*camT, pos[0], pos[1], pos[2]);
+        }
+      }
+      if (Camera* cam = m_world->get<Camera>(m_cameraEntity))
+      {
+        ImGui::Text("Active Camera: %u  FOV: %.1f", m_cameraEntity.index(), cam->fovY);
+      }
+
+      if (Transform* triT = m_world->get<Transform>(m_triangleEntity))
+      {
+        float pos[3] = { triT->localPos[0], triT->localPos[1], triT->localPos[2] };
+        if (ImGui::DragFloat3("Triangle Pos", pos, 0.05f))
+        {
+          setLocalPosition(*triT, pos[0], pos[1], pos[2]);
+        }
+      }
+      if (Transform* rootT = m_world->get<Transform>(m_rootEntity))
+      {
+        float pos[3] = { rootT->localPos[0], rootT->localPos[1], rootT->localPos[2] };
+        if (ImGui::DragFloat3("Root Pos", pos, 0.05f))
+        {
+          setLocalPosition(*rootT, pos[0], pos[1], pos[2]);
+        }
+      }
+
+      if (ImGui::TreeNode("Hierarchy"))
+      {
+        std::vector<Entity> entities;
+        m_world->ForEach<Transform>([&](Entity e, Transform&) { entities.push_back(e); });
+
+        uint32_t maxIndex = 0;
+        for (const Entity e : entities)
+          maxIndex = (e.index() > maxIndex) ? e.index() : maxIndex;
+
+        std::vector<std::vector<Entity>> children(maxIndex + 1u);
+        std::vector<Entity> roots;
+        roots.reserve(entities.size());
+
+        for (const Entity e : entities)
+        {
+          Transform* t = m_world->get<Transform>(e);
+          if (!t)
+            continue;
+
+          bool validParent = isValidEntity(t->parent) && t->parent != e &&
+                             m_world->isAlive(t->parent) && m_world->has<Transform>(t->parent);
+
+          if (!validParent)
+          {
+            roots.push_back(e);
+          }
+          else
+          {
+            children[t->parent.index()].push_back(e);
+          }
+        }
+
+        auto drawNode = [&](auto&& self, Entity e) -> void
+        {
+          const char* label = "(Entity)";
+          if (Name* n = m_world->get<Name>(e))
+            label = n->value;
+
+          const bool open = ImGui::TreeNode((void*)(uintptr_t)e.value, "%s [%u]", label, e.index());
+          if (open)
+          {
+            const uint32_t idx = e.index();
+            if (idx < children.size())
+            {
+              for (const Entity c : children[idx])
+                self(self, c);
+            }
+            ImGui::TreePop();
+          }
+        };
+
+        for (const Entity r : roots)
+          drawNode(drawNode, r);
+
+        ImGui::TreePop();
+      }
+
+      const Mat4& vp = m_world->renderFrame().viewProj;
+      ImGui::Text("ViewProj m00/m11/m22: %.2f  %.2f  %.2f", vp.m[0], vp.m[5], vp.m[10]);
     }
     ImGui::End();
   }
