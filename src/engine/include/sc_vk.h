@@ -15,6 +15,9 @@ namespace sc
 {
   struct RenderFrameData;
   class DebugDraw;
+  struct WorldStreamingState;
+  struct CullingState;
+  struct RenderPrepStreamingState;
 
   struct MeshVertex
   {
@@ -59,6 +62,9 @@ namespace sc
     void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
     void setRenderFrame(const RenderFrameData* frame) { m_renderFrame = frame; }
     void setDebugWorld(World* world, Entity camera, Entity triangle, Entity cube, Entity root);
+    void setWorldStreamingContext(WorldStreamingState* streaming,
+                                  CullingState* culling,
+                                  RenderPrepStreamingState* renderPrep);
     void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; m_debugUI.setDebugDraw(draw); }
     AssetManager& assets() { return m_assets; }
     const AssetManager& assets() const { return m_assets; }

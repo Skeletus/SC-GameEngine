@@ -16,6 +16,10 @@ union SDL_Event;
 
 namespace sc
 {
+  struct WorldStreamingState;
+  struct CullingState;
+  struct RenderPrepStreamingState;
+
   class DebugUI
   {
   public:
@@ -41,6 +45,9 @@ namespace sc
     void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
     bool isTrianglePaused() const { return m_pauseTriangle; }
     void setWorldContext(World* world, Entity camera, Entity triangle, Entity cube, Entity root);
+    void setWorldStreamingContext(WorldStreamingState* streaming,
+                                  CullingState* culling,
+                                  RenderPrepStreamingState* renderPrep);
     void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; }
     void setAssetPanelData(const AssetStatsSnapshot& stats,
                            const std::vector<std::string>& labels,
@@ -89,6 +96,9 @@ namespace sc
     Entity m_triangleEntity = kInvalidEntity;
     Entity m_cubeEntity = kInvalidEntity;
     Entity m_rootEntity = kInvalidEntity;
+    WorldStreamingState* m_worldStreaming = nullptr;
+    CullingState* m_culling = nullptr;
+    RenderPrepStreamingState* m_renderPrepStreaming = nullptr;
     DebugDraw* m_debugDraw = nullptr;
 
     AssetStatsSnapshot m_assetStats{};

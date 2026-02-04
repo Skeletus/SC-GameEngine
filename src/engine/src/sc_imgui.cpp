@@ -1,5 +1,6 @@
 #include "sc_imgui.h"
 #include "sc_log.h"
+#include "sc_world_partition.h"
 
 #include <SDL.h>
 
@@ -7,6 +8,7 @@
 #include <backends/imgui_impl_sdl2.h>
 #include <backends/imgui_impl_vulkan.h>
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -132,6 +134,15 @@ namespace sc
     m_rootEntity = root;
   }
 
+  void DebugUI::setWorldStreamingContext(WorldStreamingState* streaming,
+                                         CullingState* culling,
+                                         RenderPrepStreamingState* renderPrep)
+  {
+    m_worldStreaming = streaming;
+    m_culling = culling;
+    m_renderPrepStreaming = renderPrep;
+  }
+
   void DebugUI::setAssetPanelData(const AssetStatsSnapshot& stats,
                                   const std::vector<std::string>& labels,
                                   const std::vector<MaterialHandle>& materialIds,
@@ -239,6 +250,15 @@ namespace sc
         {
           setLocalPosition(*camT, pos[0], pos[1], pos[2]);
         }
+
+        float rot[3] = { camT->localRot[0], camT->localRot[1], camT->localRot[2] };
+        if (ImGui::DragFloat3("Camera Rot", rot, 0.01f))
+        {
+          camT->localRot[0] = rot[0];
+          camT->localRot[1] = rot[1];
+          camT->localRot[2] = rot[2];
+          markDirty(*camT);
+        }
       }
       if (Camera* cam = m_world->get<Camera>(m_cameraEntity))
       {
@@ -321,6 +341,73 @@ namespace sc
 
       const Mat4& vp = m_world->renderFrame().viewProj;
       ImGui::Text("ViewProj m00/m11/m22: %.2f  %.2f  %.2f", vp.m[0], vp.m[5], vp.m[10]);
+    }
+
+    if (m_worldStreaming)
+    {
+      ImGui::Separator();
+      ImGui::Text("World Streaming (Static)");
+
+      ImGui::Checkbox("Freeze Streaming", &m_worldStreaming->freezeStreaming);
+      if (m_culling)
+        ImGui::Checkbox("Freeze Culling", &m_culling->freezeCulling);
+      ImGui::Checkbox("Show Sector Bounds", &m_worldStreaming->showSectorBounds);
+      ImGui::Checkbox("Show Entity Bounds", &m_worldStreaming->showEntityBounds);
+
+      int activeRadius = static_cast<int>(m_worldStreaming->budgets.activeRadiusSectors);
+      if (ImGui::SliderInt("Active Radius (sectors)", &activeRadius, 0, 8))
+        m_worldStreaming->budgets.activeRadiusSectors = static_cast<uint32_t>(std::max(activeRadius, 0));
+
+      int maxSectors = static_cast<int>(m_worldStreaming->budgets.maxActiveSectors);
+      if (ImGui::SliderInt("Max Active Sectors", &maxSectors, 1, 256))
+        m_worldStreaming->budgets.maxActiveSectors = static_cast<uint32_t>(std::max(maxSectors, 1));
+
+      int maxEntities = static_cast<int>(m_worldStreaming->budgets.maxEntitiesBudget);
+      if (ImGui::SliderInt("Max Entities Budget", &maxEntities, 128, 50000))
+        m_worldStreaming->budgets.maxEntitiesBudget = static_cast<uint32_t>(std::max(maxEntities, 128));
+
+      int maxDraws = static_cast<int>(m_worldStreaming->budgets.maxDrawsBudget);
+      if (ImGui::SliderInt("Max Draws Budget", &maxDraws, 128, 50000))
+        m_worldStreaming->budgets.maxDrawsBudget = static_cast<uint32_t>(std::max(maxDraws, 128));
+
+      int boundsLimit = static_cast<int>(m_worldStreaming->entityBoundsLimit);
+      if (ImGui::SliderInt("Entity Bounds Limit", &boundsLimit, 0, 512))
+        m_worldStreaming->entityBoundsLimit = static_cast<uint32_t>(std::max(boundsLimit, 0));
+
+      const WorldPartitionFrameStats& ws = m_worldStreaming->stats;
+      ImGui::Text("Camera Sector: (%d, %d)", ws.cameraSector.x, ws.cameraSector.z);
+      ImGui::Text("Loaded / Desired: %u / %u", ws.loadedSectors, ws.desiredSectors);
+      ImGui::Text("Sectors this frame: +%u / -%u", ws.loadedThisFrame, ws.unloadedThisFrame);
+      ImGui::Text("Entities this frame: +%u / -%u", ws.entitiesSpawned, ws.entitiesDespawned);
+      ImGui::Text("Estimated sector entities: %u", ws.estimatedSectorEntities);
+
+      if (m_culling)
+      {
+        ImGui::Text("Renderables: total %u  visible %u  culled %u",
+                    m_culling->stats.renderablesTotal,
+                    m_culling->stats.visible,
+                    m_culling->stats.culled);
+      }
+
+      if (m_renderPrepStreaming)
+      {
+        ImGui::Text("Draws: emitted %u  dropped by budget %u",
+                    m_renderPrepStreaming->stats.drawsEmitted,
+                    m_renderPrepStreaming->stats.drawsDroppedByBudget);
+      }
+
+      const bool sectorBudgetExceeded = ws.rejectedBySectorBudget > 0;
+      const bool entityBudgetExceeded = ws.rejectedByEntityBudget > 0;
+      const bool drawBudgetExceeded = m_renderPrepStreaming && m_renderPrepStreaming->stats.drawsDroppedByBudget > 0;
+      ImGui::Text("Budget exceeded: sectors=%s entities=%s draws=%s",
+                  sectorBudgetExceeded ? "YES" : "NO",
+                  entityBudgetExceeded ? "YES" : "NO",
+                  drawBudgetExceeded ? "YES" : "NO");
+
+      if (sectorBudgetExceeded)
+        ImGui::Text("Sector budget rejections: %u", ws.rejectedBySectorBudget);
+      if (entityBudgetExceeded)
+        ImGui::Text("Entity budget rejections: %u", ws.rejectedByEntityBudget);
     }
 
     ImGui::Separator();

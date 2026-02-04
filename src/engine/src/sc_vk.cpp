@@ -1417,6 +1417,13 @@ namespace sc
     m_debugUI.setWorldContext(world, camera, triangle, cube, root);
   }
 
+  void VkRenderer::setWorldStreamingContext(WorldStreamingState* streaming,
+                                            CullingState* culling,
+                                            RenderPrepStreamingState* renderPrep)
+  {
+    m_debugUI.setWorldStreamingContext(streaming, culling, renderPrep);
+  }
+
   void VkRenderer::buildAssetUiSnapshot()
   {
     AssetStatsSnapshot stats = m_assets.stats();

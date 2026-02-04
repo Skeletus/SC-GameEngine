@@ -6,6 +6,7 @@
 #include "sc_ecs.h"
 #include "sc_scheduler.h"
 #include "sc_debug_draw.h"
+#include "sc_world_partition.h"
 
 #include <SDL.h>
 #include <thread>
@@ -53,18 +54,40 @@ int main()
   }
 
   sc::World world;
-  world.reserveEntities(1024);
-  world.renderFrame().reserve(1024);
+  world.reserveEntities(16384);
+  world.renderFrame().reserve(8192);
 
   sc::Scheduler scheduler;
 
   sc::SpawnerState spawner{};
-  spawner.spawnCount = 256;
-  spawner.churnEvery = 120;
-  spawner.churnCount = 8;
+  spawner.spawnCount = 0;
+  spawner.churnEvery = 0;
+  spawner.churnCount = 0;
 
-  sc::RenderPrepState renderPrep{};
+  sc::WorldStreamingState worldStreaming{};
+  sc::WorldPartitionConfig worldCfg{};
+  worldCfg.sectorSizeMeters = 64.0f;
+  worldCfg.seed = 424242u;
+  worldCfg.propsPerSectorMin = 18u;
+  worldCfg.propsPerSectorMax = 34u;
+  worldCfg.includeGroundPlane = true;
+  worldStreaming.partition.configure(worldCfg);
+  worldStreaming.budgets.activeRadiusSectors = 2u;
+  worldStreaming.budgets.maxActiveSectors = 25u;
+  worldStreaming.budgets.maxEntitiesBudget = 5000u;
+  worldStreaming.budgets.maxDrawsBudget = 6000u;
+
+  sc::CullingState culling{};
+  culling.frame = &world.renderFrame();
+  culling.candidates.reserve(8192);
+  culling.visible.reserve(8192);
+  culling.culled.reserve(8192);
+  culling.visibilityMask.reserve(8192);
+
+  sc::RenderPrepStreamingState renderPrep{};
   renderPrep.frame = &world.renderFrame();
+  renderPrep.culling = &culling;
+  renderPrep.streaming = &worldStreaming;
 
   sc::CameraSystemState cameraState{};
   cameraState.frame = &world.renderFrame();
@@ -72,11 +95,18 @@ int main()
   sc::DebugDraw debugDraw{};
   debugDraw.reserve(65536);
 
+  sc::DebugDrawSystemState debugDrawState{};
+  debugDrawState.draw = &debugDraw;
+  debugDrawState.streaming = &worldStreaming;
+  debugDrawState.culling = &culling;
+
   scheduler.addSystem("Spawner", sc::SystemPhase::Simulation, sc::SpawnerSystem, &spawner);
-  scheduler.addSystem("Transform", sc::SystemPhase::Simulation, sc::TransformSystem, nullptr, { "Spawner" });
+  scheduler.addSystem("WorldStreaming", sc::SystemPhase::Simulation, sc::WorldStreamingSystem, &worldStreaming, { "Spawner" });
+  scheduler.addSystem("Transform", sc::SystemPhase::Simulation, sc::TransformSystem, nullptr, { "WorldStreaming" });
   scheduler.addSystem("Camera", sc::SystemPhase::Simulation, sc::CameraSystem, &cameraState, { "Transform" });
-  scheduler.addSystem("RenderPrep", sc::SystemPhase::RenderPrep, sc::RenderPrepSystem, &renderPrep, { "Camera" });
-  scheduler.addSystem("DebugDraw", sc::SystemPhase::RenderPrep, sc::DebugDrawSystem, &debugDraw, { "RenderPrep" });
+  scheduler.addSystem("Culling", sc::SystemPhase::RenderPrep, sc::CullingSystem, &culling, { "Camera" });
+  scheduler.addSystem("RenderPrep", sc::SystemPhase::RenderPrep, sc::RenderPrepStreamingSystem, &renderPrep, { "Culling" });
+  scheduler.addSystem("DebugDraw", sc::SystemPhase::RenderPrep, sc::DebugDrawSystem, &debugDrawState, { "RenderPrep" });
   scheduler.addSystem("Debug", sc::SystemPhase::Render, sc::DebugSystem, nullptr, { "DebugDraw" });
   scheduler.finalize();
 
@@ -104,6 +134,7 @@ int main()
     vk.setEcsStats(world.statsSnapshot(), scheduler.statsSnapshot());
     vk.setRenderFrame(&world.renderFrame());
     vk.setDebugWorld(&world, spawner.camera, spawner.triangle, spawner.cube, spawner.root);
+    vk.setWorldStreamingContext(&worldStreaming, &culling, &renderPrep);
     vk.setDebugDraw(&debugDraw);
 
     if (vk.beginFrame())
