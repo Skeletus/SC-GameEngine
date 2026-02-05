@@ -72,10 +72,14 @@ int main()
   worldCfg.propsPerSectorMax = 34u;
   worldCfg.includeGroundPlane = true;
   worldStreaming.partition.configure(worldCfg);
-  worldStreaming.budgets.activeRadiusSectors = 2u;
+  worldStreaming.budgets.loadRadiusSectors = 2u;
+  worldStreaming.budgets.unloadRadiusSectors = 3u;
   worldStreaming.budgets.maxActiveSectors = 25u;
   worldStreaming.budgets.maxEntitiesBudget = 5000u;
   worldStreaming.budgets.maxDrawsBudget = 6000u;
+  worldStreaming.budgets.maxConcurrentLoads = 4u;
+  worldStreaming.budgets.maxActivationsPerFrame = 2u;
+  worldStreaming.budgets.maxDespawnsPerFrame = 128u;
 
   sc::CullingState culling{};
   culling.frame = &world.renderFrame();
@@ -88,6 +92,7 @@ int main()
   renderPrep.frame = &world.renderFrame();
   renderPrep.culling = &culling;
   renderPrep.streaming = &worldStreaming;
+  renderPrep.assets = &vk.assets();
 
   sc::CameraSystemState cameraState{};
   cameraState.frame = &world.renderFrame();
@@ -141,6 +146,7 @@ int main()
       vk.endFrame();
   }
 
+  worldStreaming.partition.shutdownStreaming();
   jobs.shutdown();
   vk.shutdown();
   app.shutdown();

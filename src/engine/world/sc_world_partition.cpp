@@ -1,10 +1,19 @@
 #include "sc_world_partition.h"
 
 #include "sc_jobs.h"
+#include "sc_assets.h"
+#include "sc_paths.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <thread>
+#include <chrono>
 
 namespace sc
 {
@@ -54,6 +63,80 @@ namespace sc
       const int dx = a.x - b.x;
       const int dz = a.z - b.z;
       return dx * dx + dz * dz;
+    }
+
+    static float normalize2d(float& x, float& z)
+    {
+      const float lenSq = x * x + z * z;
+      if (lenSq <= 1e-6f)
+        return 0.0f;
+      const float inv = 1.0f / std::sqrt(lenSq);
+      x *= inv;
+      z *= inv;
+      return std::sqrt(lenSq);
+    }
+
+    static void generateSectorSpawnsStatic(const WorldPartitionConfig& config,
+                                           const SectorCoord& coord,
+                                           std::vector<SpawnRecord>& outSpawns)
+    {
+      const float size = config.sectorSizeMeters;
+      const float minX = static_cast<float>(coord.x) * size;
+      const float minZ = static_cast<float>(coord.z) * size;
+      const float centerX = minX + size * 0.5f;
+      const float centerZ = minZ + size * 0.5f;
+
+      uint32_t rng = hashCoordSeed(config.seed, coord);
+      const uint32_t countRange = config.propsPerSectorMax - config.propsPerSectorMin + 1u;
+      const uint32_t propCount = config.propsPerSectorMin + (countRange > 0 ? (mix32(rng) % countRange) : 0u);
+
+      outSpawns.clear();
+      outSpawns.reserve(propCount + (config.includeGroundPlane ? 1u : 0u));
+
+      if (config.includeGroundPlane)
+      {
+        SpawnRecord ground{};
+        std::snprintf(ground.name, Name::kMax, "Ground_%d_%d", coord.x, coord.z);
+        ground.position[0] = centerX;
+        ground.position[1] = -0.55f;
+        ground.position[2] = centerZ;
+        ground.scale[0] = size * 0.5f;
+        ground.scale[1] = 0.10f;
+        ground.scale[2] = size * 0.5f;
+        ground.meshId = 1u;
+        ground.materialId = 2u; // default unlit material
+        ground.localBounds = kUnitCubeBounds;
+        outSpawns.push_back(ground);
+      }
+
+      const float pad = 1.0f;
+      for (uint32_t i = 0; i < propCount; ++i)
+      {
+        SpawnRecord rec{};
+        std::snprintf(rec.name, Name::kMax, "Prop_%d_%d_%u", coord.x, coord.z, i);
+
+        const float x = lerp(minX + pad, minX + size - pad, rand01(rng));
+        const float z = lerp(minZ + pad, minZ + size - pad, rand01(rng));
+
+        const float sx = lerp(0.4f, 1.9f, rand01(rng));
+        const float sy = lerp(0.5f, 3.2f, rand01(rng));
+        const float sz = lerp(0.4f, 1.9f, rand01(rng));
+
+        rec.position[0] = x;
+        rec.position[1] = sy * 0.5f;
+        rec.position[2] = z;
+        rec.rotation[1] = rand01(rng) * (kPi * 2.0f);
+        rec.scale[0] = sx;
+        rec.scale[1] = sy;
+        rec.scale[2] = sz;
+
+        const float m = rand01(rng);
+        rec.materialId = (m < 0.40f) ? 0u : ((m < 0.80f) ? 1u : 2u);
+        rec.meshId = (rand01(rng) < 0.90f) ? 1u : 0u;
+        rec.localBounds = kUnitCubeBounds;
+
+        outSpawns.push_back(rec);
+      }
     }
 
     static Entity pickActiveCamera(World& world, Transform*& outTransform)
@@ -166,99 +249,76 @@ namespace sc
 
   void WorldPartition::generateSectorSpawns(Sector& sector)
   {
-    const AABB bounds = sectorBounds(sector.coord);
-    const float size = m_config.sectorSizeMeters;
-    const float centerX = bounds.min.x + size * 0.5f;
-    const float centerZ = bounds.min.z + size * 0.5f;
-
-    uint32_t rng = hashCoordSeed(m_config.seed, sector.coord);
-    const uint32_t countRange = m_config.propsPerSectorMax - m_config.propsPerSectorMin + 1u;
-    const uint32_t propCount = m_config.propsPerSectorMin + (countRange > 0 ? (mix32(rng) % countRange) : 0u);
-
-    sector.spawns.clear();
-    sector.spawns.reserve(propCount + (m_config.includeGroundPlane ? 1u : 0u));
-
-    if (m_config.includeGroundPlane)
-    {
-      SpawnRecord ground{};
-      std::snprintf(ground.name, Name::kMax, "Ground_%d_%d", sector.coord.x, sector.coord.z);
-      ground.position[0] = centerX;
-      ground.position[1] = -0.55f;
-      ground.position[2] = centerZ;
-      ground.scale[0] = size * 0.5f;
-      ground.scale[1] = 0.10f;
-      ground.scale[2] = size * 0.5f;
-      ground.meshId = 1u;
-      ground.materialId = 2u; // default unlit material
-      ground.localBounds = kUnitCubeBounds;
-      sector.spawns.push_back(ground);
-    }
-
-    const float pad = 1.0f;
-    for (uint32_t i = 0; i < propCount; ++i)
-    {
-      SpawnRecord rec{};
-      std::snprintf(rec.name, Name::kMax, "Prop_%d_%d_%u", sector.coord.x, sector.coord.z, i);
-
-      const float x = lerp(bounds.min.x + pad, bounds.max.x - pad, rand01(rng));
-      const float z = lerp(bounds.min.z + pad, bounds.max.z - pad, rand01(rng));
-
-      const float sx = lerp(0.4f, 1.9f, rand01(rng));
-      const float sy = lerp(0.5f, 3.2f, rand01(rng));
-      const float sz = lerp(0.4f, 1.9f, rand01(rng));
-
-      rec.position[0] = x;
-      rec.position[1] = sy * 0.5f;
-      rec.position[2] = z;
-      rec.rotation[1] = rand01(rng) * (kPi * 2.0f);
-      rec.scale[0] = sx;
-      rec.scale[1] = sy;
-      rec.scale[2] = sz;
-
-      const float m = rand01(rng);
-      rec.materialId = (m < 0.40f) ? 0u : ((m < 0.80f) ? 1u : 2u);
-      rec.meshId = (rand01(rng) < 0.90f) ? 1u : 0u;
-      rec.localBounds = kUnitCubeBounds;
-
-      sector.spawns.push_back(rec);
-    }
+    generateSectorSpawnsStatic(m_config, sector.coord, sector.spawns);
   }
 
-  void WorldPartition::markLoaded(Sector& sector)
+  void WorldPartition::markQueued(Sector& sector)
   {
-    if (sector.state == SectorLoadState::Loaded)
+    if (sector.state == SectorLoadState::Queued ||
+        sector.state == SectorLoadState::Loading ||
+        sector.state == SectorLoadState::ReadyToActivate ||
+        sector.state == SectorLoadState::Active)
     {
       sector.lastTouchedFrame = m_frameCounter;
       return;
     }
 
-    if (sector.spawns.empty())
-      generateSectorSpawns(sector);
-
-    sector.state = SectorLoadState::Loaded;
+    sector.state = SectorLoadState::Queued;
     sector.lastTouchedFrame = m_frameCounter;
-    m_loadedSectorCount++;
-    m_loadedEntityEstimate += static_cast<uint32_t>(sector.spawns.size());
+    sector.queuedAt = nowTicks();
+    sector.requestId = m_requestIdCounter++;
+    sector.pendingDespawns = 0;
+  }
+
+  void WorldPartition::markReady(Sector& sector)
+  {
+    sector.state = SectorLoadState::ReadyToActivate;
+    sector.lastTouchedFrame = m_frameCounter;
+  }
+
+  void WorldPartition::markActive(Sector& sector, uint32_t spawnCount)
+  {
+    if (sector.state == SectorLoadState::Active)
+    {
+      sector.lastTouchedFrame = m_frameCounter;
+      return;
+    }
+
+    sector.state = SectorLoadState::Active;
+    sector.lastTouchedFrame = m_frameCounter;
+    sector.activateAt = nowTicks();
+    sector.pendingDespawns = 0;
+    m_activeSectorCount++;
+    m_activeEntityEstimate += spawnCount;
+
     auto unloadedIt = std::find(m_unloadedThisFrame.begin(), m_unloadedThisFrame.end(), sector.coord);
     if (unloadedIt != m_unloadedThisFrame.end())
       m_unloadedThisFrame.erase(unloadedIt);
     m_loadedThisFrame.push_back(sector.coord);
   }
 
-  void WorldPartition::markUnloaded(Sector& sector)
+  void WorldPartition::markUnloading(Sector& sector)
   {
-    if (sector.state != SectorLoadState::Loaded)
+    if (sector.state == SectorLoadState::Unloading)
       return;
 
-    sector.state = SectorLoadState::Unloaded;
-    if (m_loadedSectorCount > 0)
-      m_loadedSectorCount--;
+    if (sector.state == SectorLoadState::Active && m_activeSectorCount > 0)
+      m_activeSectorCount--;
 
-    const uint32_t cost = static_cast<uint32_t>(sector.spawns.size());
-    if (m_loadedEntityEstimate > cost)
-      m_loadedEntityEstimate -= cost;
-    else
-      m_loadedEntityEstimate = 0;
+    sector.state = SectorLoadState::Unloading;
+    sector.lastTouchedFrame = m_frameCounter;
+  }
+
+  void WorldPartition::markUnloaded(Sector& sector)
+  {
+    if (sector.state == SectorLoadState::Active && m_activeSectorCount > 0)
+      m_activeSectorCount--;
+
+    sector.state = SectorLoadState::Unloaded;
+    sector.lastTouchedFrame = m_frameCounter;
+    sector.spawns.clear();
+    sector.entities.clear();
+    sector.pendingDespawns = 0;
 
     auto loadedIt = std::find(m_loadedThisFrame.begin(), m_loadedThisFrame.end(), sector.coord);
     if (loadedIt != m_loadedThisFrame.end())
@@ -269,7 +329,12 @@ namespace sc
   Sector& WorldPartition::ensureSectorLoaded(const SectorCoord& coord)
   {
     Sector& sector = getOrCreateSector(coord);
-    markLoaded(sector);
+    if (sector.state != SectorLoadState::Active)
+    {
+      if (sector.spawns.empty())
+        generateSectorSpawns(sector);
+      markActive(sector, static_cast<uint32_t>(sector.spawns.size()));
+    }
     return sector;
   }
 
@@ -278,7 +343,7 @@ namespace sc
     Sector* sector = findSector(coord);
     if (!sector)
       return false;
-    if (sector->state != SectorLoadState::Loaded)
+    if (sector->state != SectorLoadState::Active)
       return false;
     markUnloaded(*sector);
     return true;
@@ -294,20 +359,47 @@ namespace sc
     m_frameStats.entitiesDespawned = 0;
     m_frameStats.rejectedBySectorBudget = 0;
     m_frameStats.rejectedByEntityBudget = 0;
+    m_frameStats.completedLoads = 0;
+    m_frameStats.activations = 0;
+    m_frameStats.despawns = 0;
+    m_frameStats.avgLoadMs = 0.0f;
+    m_frameStats.maxLoadMs = 0.0f;
+    m_frameStats.pumpLoadsMs = 0.0f;
+    m_frameStats.pumpUnloadsMs = 0.0f;
   }
 
-  void WorldPartition::updateActiveSet(const Vec3& cameraPos, uint32_t radiusInSectors, const WorldPartitionBudget& budget)
+  void WorldPartition::updateActiveSet(const Vec3& cameraPos,
+                                       const Vec3& cameraForward,
+                                       uint32_t loadRadiusSectors,
+                                       uint32_t unloadRadiusSectors,
+                                       const WorldPartitionBudget& budget,
+                                       bool useFrustumBias,
+                                       float frustumBiasWeight,
+                                       bool allowScheduling)
   {
     m_frameCounter++;
     clearFrameDeltas();
 
+    if (unloadRadiusSectors <= loadRadiusSectors)
+      unloadRadiusSectors = loadRadiusSectors + 1u;
+
     const SectorCoord cameraSector = worldToSector(cameraPos);
+    m_lastCameraSector = cameraSector;
+    m_lastCameraForward = cameraForward;
+    m_lastLoadRadius = loadRadiusSectors;
+    m_lastUnloadRadius = unloadRadiusSectors;
+    m_lastUseFrustumBias = useFrustumBias;
+    m_lastFrustumBiasWeight = frustumBiasWeight;
+
     m_frameStats.cameraSector = cameraSector;
-    m_frameStats.activeRadiusSectors = radiusInSectors;
+    m_frameStats.loadRadiusSectors = loadRadiusSectors;
+    m_frameStats.unloadRadiusSectors = unloadRadiusSectors;
+
+    const int32_t r = static_cast<int32_t>(loadRadiusSectors);
+    const uint32_t side = static_cast<uint32_t>(r * 2 + 1);
+    m_frameStats.desiredSectors = side * side;
 
     m_scratchDesired.clear();
-    const int32_t r = static_cast<int32_t>(radiusInSectors);
-    const uint32_t side = static_cast<uint32_t>(r * 2 + 1);
     m_scratchDesired.reserve(static_cast<size_t>(side) * static_cast<size_t>(side));
 
     for (int32_t dz = -r; dz <= r; ++dz)
@@ -321,129 +413,472 @@ namespace sc
     std::sort(m_scratchDesired.begin(), m_scratchDesired.end(),
       [&](const SectorCoord& a, const SectorCoord& b)
       {
-        const int da = sectorDistanceSq(a, cameraSector);
-        const int db = sectorDistanceSq(b, cameraSector);
+        const float pa = sectorPriority(a, cameraSector, cameraForward, frustumBiasWeight, useFrustumBias);
+        const float pb = sectorPriority(b, cameraSector, cameraForward, frustumBiasWeight, useFrustumBias);
+        if (pa != pb) return pa < pb;
+        return coordLess(a, b);
+      });
+
+    uint32_t reserved = 0;
+    for (const auto& [coord, sector] : m_sectors)
+    {
+      (void)coord;
+      if (sector.state == SectorLoadState::Queued ||
+          sector.state == SectorLoadState::Loading ||
+          sector.state == SectorLoadState::ReadyToActivate ||
+          sector.state == SectorLoadState::Active)
+      {
+        reserved++;
+      }
+    }
+
+    if (allowScheduling)
+    {
+      for (const SectorCoord& coord : m_scratchDesired)
+      {
+        Sector& sector = getOrCreateSector(coord);
+        if (sector.state == SectorLoadState::Queued ||
+            sector.state == SectorLoadState::Loading ||
+            sector.state == SectorLoadState::ReadyToActivate ||
+            sector.state == SectorLoadState::Active)
+        {
+          sector.lastTouchedFrame = m_frameCounter;
+          continue;
+        }
+
+        if (sector.state == SectorLoadState::Unloading)
+          continue;
+
+        if (budget.maxActiveSectors > 0 && reserved >= budget.maxActiveSectors)
+        {
+          m_frameStats.rejectedBySectorBudget++;
+          continue;
+        }
+
+        markQueued(sector);
+        m_pendingLoads.push_back(coord);
+        reserved++;
+      }
+    }
+
+    const int unloadRadiusSq = static_cast<int>(unloadRadiusSectors) * static_cast<int>(unloadRadiusSectors);
+
+    if (allowScheduling)
+    {
+      for (auto& [coord, sector] : m_sectors)
+      {
+        const int distSq = sectorDistanceSq(coord, cameraSector);
+        if (distSq <= unloadRadiusSq)
+        {
+          if (sector.state == SectorLoadState::Active)
+            sector.lastTouchedFrame = m_frameCounter;
+          continue;
+        }
+
+        switch (sector.state)
+        {
+          case SectorLoadState::Active:
+            markUnloading(sector);
+            queueUnloadEntities(sector);
+            break;
+          case SectorLoadState::ReadyToActivate:
+            markUnloaded(sector);
+            break;
+          case SectorLoadState::Queued:
+          case SectorLoadState::Loading:
+            sector.state = SectorLoadState::Unloaded;
+            sector.requestId++;
+            sector.spawns.clear();
+            sector.entities.clear();
+            sector.pendingDespawns = 0;
+            break;
+          default:
+            break;
+        }
+      }
+    }
+
+    uint32_t queued = 0;
+    uint32_t loading = 0;
+    uint32_t ready = 0;
+    uint32_t active = 0;
+    uint32_t unloading = 0;
+    for (const auto& [coord, sector] : m_sectors)
+    {
+      (void)coord;
+      switch (sector.state)
+      {
+        case SectorLoadState::Queued: queued++; break;
+        case SectorLoadState::Loading: loading++; break;
+        case SectorLoadState::ReadyToActivate: ready++; break;
+        case SectorLoadState::Active: active++; break;
+        case SectorLoadState::Unloading: unloading++; break;
+        default: break;
+      }
+    }
+
+    m_frameStats.queuedSectors = queued;
+    m_frameStats.loadingSectors = loading;
+    m_frameStats.readySectors = ready;
+    m_frameStats.activeSectors = active;
+    m_frameStats.unloadingSectors = unloading;
+    m_frameStats.loadedSectors = m_activeSectorCount;
+    m_frameStats.loadedThisFrame = static_cast<uint32_t>(m_loadedThisFrame.size());
+    m_frameStats.unloadedThisFrame = static_cast<uint32_t>(m_unloadedThisFrame.size());
+    m_frameStats.estimatedSectorEntities = m_activeEntityEstimate;
+  }
+
+  float WorldPartition::sectorPriority(const SectorCoord& coord,
+                                       const SectorCoord& cameraSector,
+                                       const Vec3& cameraForward,
+                                       float frustumBiasWeight,
+                                       bool useFrustumBias) const
+  {
+    const int dx = coord.x - cameraSector.x;
+    const int dz = coord.z - cameraSector.z;
+    const float distSq = static_cast<float>(dx * dx + dz * dz);
+    if (!useFrustumBias || frustumBiasWeight <= 0.0f)
+      return distSq;
+
+    float fx = cameraForward.x;
+    float fz = cameraForward.z;
+    if (normalize2d(fx, fz) <= 1e-6f)
+      return distSq;
+
+    float dirx = static_cast<float>(dx);
+    float dirz = static_cast<float>(dz);
+    if (normalize2d(dirx, dirz) <= 1e-6f)
+      return distSq;
+
+    const float dot = dirx * fx + dirz * fz;
+    return distSq - dot * frustumBiasWeight;
+  }
+
+  bool WorldPartition::isSectorDesired(const SectorCoord& coord) const
+  {
+    const int distSq = sectorDistanceSq(coord, m_lastCameraSector);
+    const int r = static_cast<int>(m_lastUnloadRadius);
+    if (r <= 0)
+      return distSq == 0;
+    return distSq <= r * r;
+  }
+
+  void WorldPartition::queueUnloadEntities(Sector& sector)
+  {
+    if (sector.entities.empty())
+    {
+      sector.pendingDespawns = 0;
+      return;
+    }
+
+    for (const Entity e : sector.entities)
+      m_pendingDespawns.push_back({ e, sector.coord });
+
+    sector.pendingDespawns = static_cast<uint32_t>(sector.entities.size());
+    sector.entities.clear();
+  }
+
+  bool WorldPartition::readSectorFile(const SectorCoord& coord, std::vector<SpawnRecord>& outSpawns) const
+  {
+    const std::string filename = "world/sectors/sector_" + std::to_string(coord.x) + "_" + std::to_string(coord.z) + ".bin";
+    const std::filesystem::path resolved = resolveAssetPath(filename);
+    std::ifstream file(resolved, std::ios::binary);
+    if (!file.is_open())
+      return false;
+
+    struct Header
+    {
+      char magic[4];
+      uint32_t version;
+      uint32_t count;
+    } header{};
+
+    file.read(reinterpret_cast<char*>(&header), sizeof(header));
+    if (!file.good())
+      return false;
+    if (std::memcmp(header.magic, "SCS1", 4) != 0 || header.version != 1)
+      return false;
+
+    outSpawns.clear();
+    outSpawns.resize(header.count);
+    for (uint32_t i = 0; i < header.count; ++i)
+    {
+      SpawnRecord rec{};
+      file.read(rec.name, Name::kMax);
+      file.read(reinterpret_cast<char*>(rec.position), sizeof(float) * 3);
+      file.read(reinterpret_cast<char*>(rec.rotation), sizeof(float) * 3);
+      file.read(reinterpret_cast<char*>(rec.scale), sizeof(float) * 3);
+      file.read(reinterpret_cast<char*>(&rec.meshId), sizeof(uint32_t));
+      file.read(reinterpret_cast<char*>(&rec.materialId), sizeof(uint32_t));
+      file.read(reinterpret_cast<char*>(&rec.localBounds.min), sizeof(float) * 3);
+      file.read(reinterpret_cast<char*>(&rec.localBounds.max), sizeof(float) * 3);
+      if (!file.good())
+        return false;
+      outSpawns[i] = rec;
+    }
+
+    return true;
+  }
+
+  void WorldPartition::dispatchPendingLoads(uint32_t maxConcurrentLoads)
+  {
+    if (m_shutdown || maxConcurrentLoads == 0)
+      return;
+
+    static const uint32_t scopeId = registerScope("Streaming/Load");
+    const uint32_t limit = maxConcurrentLoads;
+    while (m_inFlightLoads < limit && !m_pendingLoads.empty())
+    {
+      const SectorCoord coord = m_pendingLoads.front();
+      m_pendingLoads.pop_front();
+
+      Sector* sector = findSector(coord);
+      if (!sector || sector->state != SectorLoadState::Queued)
+        continue;
+
+      sector->state = SectorLoadState::Loading;
+      const uint32_t requestId = sector->requestId;
+      const WorldPartitionConfig config = m_config;
+      WorldPartition* self = this;
+      m_inFlightLoads++;
+
+      jobs().DispatchAsync([self, config, coord, requestId](const JobContext&)
+      {
+        SectorLoadResult result{};
+        result.coord = coord;
+        result.requestId = requestId;
+        result.ioStart = nowTicks();
+
+        std::vector<SpawnRecord> spawns;
+        if (!self->readSectorFile(coord, spawns))
+          generateSectorSpawnsStatic(config, coord, spawns);
+
+        result.ioEnd = nowTicks();
+        result.spawns = std::move(spawns);
+        self->m_completedLoads.push(std::move(result));
+      }, scopeId);
+    }
+  }
+
+  void WorldPartition::pumpCompletedLoads(World& world,
+                                          const WorldPartitionBudget& budget,
+                                          uint32_t maxActivationsPerFrame)
+  {
+    const Tick start = nowTicks();
+    uint32_t completed = 0;
+    double totalLoadMs = 0.0;
+    float maxLoadMs = 0.0f;
+
+    SectorLoadResult result{};
+    while (m_completedLoads.pop(result))
+    {
+      if (m_inFlightLoads > 0)
+        m_inFlightLoads--;
+
+      Sector* sector = findSector(result.coord);
+      if (!sector)
+        continue;
+      if (sector->requestId != result.requestId)
+        continue;
+
+      const double loadMs = ticksToSeconds(result.ioEnd - result.ioStart) * 1000.0;
+      totalLoadMs += loadMs;
+      if (loadMs > maxLoadMs)
+        maxLoadMs = static_cast<float>(loadMs);
+
+      sector->spawns = std::move(result.spawns);
+      sector->ioStart = result.ioStart;
+      sector->ioEnd = result.ioEnd;
+
+      completed++;
+
+      if (!isSectorDesired(sector->coord))
+      {
+        markUnloaded(*sector);
+        continue;
+      }
+
+      markReady(*sector);
+    }
+
+    m_frameStats.completedLoads = completed;
+    m_frameStats.maxLoadMs = maxLoadMs;
+    m_frameStats.avgLoadMs = (completed > 0) ? static_cast<float>(totalLoadMs / completed) : 0.0f;
+
+    uint32_t activationLimit = maxActivationsPerFrame == 0 ? 0xFFFFFFFFu : maxActivationsPerFrame;
+    uint32_t activations = 0;
+    uint32_t spawned = 0;
+
+    m_scratchReady.clear();
+    for (const auto& [coord, sector] : m_sectors)
+    {
+      if (sector.state == SectorLoadState::ReadyToActivate && isSectorDesired(coord))
+        m_scratchReady.push_back(coord);
+    }
+
+    std::sort(m_scratchReady.begin(), m_scratchReady.end(),
+      [&](const SectorCoord& a, const SectorCoord& b)
+      {
+        const int da = sectorDistanceSq(a, m_lastCameraSector);
+        const int db = sectorDistanceSq(b, m_lastCameraSector);
         if (da != db) return da < db;
         return coordLess(a, b);
       });
 
-    m_frameStats.desiredSectors = static_cast<uint32_t>(m_scratchDesired.size());
-
-    m_scratchDesiredLookup = m_scratchDesired;
-    std::sort(m_scratchDesiredLookup.begin(), m_scratchDesiredLookup.end(),
-      [&](const SectorCoord& a, const SectorCoord& b)
-      {
-        return coordLess(a, b);
-      });
-
-    auto isDesired = [&](const SectorCoord& coord)
+    for (const SectorCoord& coord : m_scratchReady)
     {
-      return std::binary_search(m_scratchDesiredLookup.begin(),
-                                m_scratchDesiredLookup.end(),
-                                coord,
-                                [&](const SectorCoord& a, const SectorCoord& b)
-                                {
-                                  return coordLess(a, b);
-                                });
-    };
+      if (activations >= activationLimit)
+        break;
 
-    for (const SectorCoord& coord : m_scratchDesired)
-    {
-      Sector& sector = getOrCreateSector(coord);
-      if (sector.state == SectorLoadState::Loaded)
-      {
-        sector.lastTouchedFrame = m_frameCounter;
+      Sector* sector = findSector(coord);
+      if (!sector || sector->state != SectorLoadState::ReadyToActivate)
         continue;
-      }
 
-      if (sector.spawns.empty())
-        generateSectorSpawns(sector);
-      const uint32_t sectorCost = static_cast<uint32_t>(sector.spawns.size());
-
-      if (budget.maxActiveSectors > 0 && m_loadedSectorCount >= budget.maxActiveSectors)
-      {
-        m_frameStats.rejectedBySectorBudget++;
-        continue;
-      }
-
-      if (budget.maxEntitiesBudget > 0 && (m_loadedEntityEstimate + sectorCost) > budget.maxEntitiesBudget)
+      const uint32_t sectorCost = static_cast<uint32_t>(sector->spawns.size());
+      if (budget.maxEntitiesBudget > 0 && (m_activeEntityEstimate + sectorCost) > budget.maxEntitiesBudget)
       {
         m_frameStats.rejectedByEntityBudget++;
         continue;
       }
 
-      markLoaded(sector);
+      sector->entities.clear();
+      sector->entities.reserve(sector->spawns.size());
+
+      for (const SpawnRecord& rec : sector->spawns)
+      {
+        Entity e = world.create();
+        Transform& t = world.add<Transform>(e);
+        setLocal(t, rec.position, rec.rotation, rec.scale);
+
+        RenderMesh& rm = world.add<RenderMesh>(e);
+        rm.meshId = rec.meshId;
+        rm.materialId = rec.materialId;
+
+        WorldSector& ws = world.add<WorldSector>(e);
+        ws.coord = coord;
+        ws.active = true;
+
+        Bounds& b = world.add<Bounds>(e);
+        b.localAabb = rec.localBounds;
+
+        setName(world.add<Name>(e), rec.name);
+
+        sector->entities.push_back(e);
+        spawned++;
+      }
+
+      markActive(*sector, sectorCost);
+      activations++;
     }
 
-    m_scratchUnload.clear();
-    m_scratchUnload.reserve(m_loadedSectorCount);
+    m_frameStats.entitiesSpawned += spawned;
+    m_frameStats.activations = activations;
+    m_frameStats.loadedThisFrame = static_cast<uint32_t>(m_loadedThisFrame.size());
+    m_frameStats.loadedSectors = m_activeSectorCount;
+    m_frameStats.estimatedSectorEntities = m_activeEntityEstimate;
+    m_frameStats.pumpLoadsMs = static_cast<float>(ticksToSeconds(nowTicks() - start) * 1000.0);
+  }
+
+  void WorldPartition::pumpUnloadQueue(World& world, uint32_t maxDespawnsPerFrame)
+  {
+    const Tick start = nowTicks();
+    const uint32_t limit = maxDespawnsPerFrame == 0 ? 0xFFFFFFFFu : maxDespawnsPerFrame;
+    uint32_t despawned = 0;
+
+    while (despawned < limit && !m_pendingDespawns.empty())
+    {
+      const PendingDespawn pd = m_pendingDespawns.front();
+      m_pendingDespawns.pop_front();
+
+      if (world.destroy(pd.entity))
+      {
+        despawned++;
+        if (m_activeEntityEstimate > 0)
+          m_activeEntityEstimate--;
+      }
+      else
+      {
+        if (m_activeEntityEstimate > 0)
+          m_activeEntityEstimate--;
+      }
+
+      Sector* sector = findSector(pd.coord);
+      if (sector && sector->pendingDespawns > 0)
+      {
+        sector->pendingDespawns--;
+        if (sector->pendingDespawns == 0 && sector->state == SectorLoadState::Unloading)
+        {
+          markUnloaded(*sector);
+        }
+      }
+    }
+
+    m_frameStats.entitiesDespawned += despawned;
+    m_frameStats.despawns = despawned;
+    m_frameStats.unloadedThisFrame = static_cast<uint32_t>(m_unloadedThisFrame.size());
+    m_frameStats.loadedSectors = m_activeSectorCount;
+    m_frameStats.estimatedSectorEntities = m_activeEntityEstimate;
+    m_frameStats.pumpUnloadsMs = static_cast<float>(ticksToSeconds(nowTicks() - start) * 1000.0);
+
+    uint32_t queued = 0;
+    uint32_t loading = 0;
+    uint32_t ready = 0;
+    uint32_t active = 0;
+    uint32_t unloading = 0;
     for (const auto& [coord, sector] : m_sectors)
     {
-      if (sector.state != SectorLoadState::Loaded)
-        continue;
-      if (isDesired(coord))
-        continue;
-      m_scratchUnload.push_back(coord);
+      (void)coord;
+      switch (sector.state)
+      {
+        case SectorLoadState::Queued: queued++; break;
+        case SectorLoadState::Loading: loading++; break;
+        case SectorLoadState::ReadyToActivate: ready++; break;
+        case SectorLoadState::Active: active++; break;
+        case SectorLoadState::Unloading: unloading++; break;
+        default: break;
+      }
     }
 
-    std::sort(m_scratchUnload.begin(), m_scratchUnload.end(),
-      [&](const SectorCoord& a, const SectorCoord& b)
-      {
-        const int da = sectorDistanceSq(a, cameraSector);
-        const int db = sectorDistanceSq(b, cameraSector);
-        if (da != db) return da > db;
-        return coordLess(a, b);
-      });
+    m_frameStats.queuedSectors = queued;
+    m_frameStats.loadingSectors = loading;
+    m_frameStats.readySectors = ready;
+    m_frameStats.activeSectors = active;
+    m_frameStats.unloadingSectors = unloading;
+  }
 
-    for (const SectorCoord& coord : m_scratchUnload)
-      unloadSector(coord);
+  void WorldPartition::shutdownStreaming()
+  {
+    m_shutdown = true;
 
-    const bool needSectorTrim = (budget.maxActiveSectors > 0 && m_loadedSectorCount > budget.maxActiveSectors);
-    const bool needEntityTrim = (budget.maxEntitiesBudget > 0 && m_loadedEntityEstimate > budget.maxEntitiesBudget);
-    if (needSectorTrim || needEntityTrim)
+    m_pendingLoads.clear();
+    for (auto& [coord, sector] : m_sectors)
     {
-      m_scratchLoaded.clear();
-      m_scratchLoaded.reserve(m_loadedSectorCount);
-      for (const auto& [coord, sector] : m_sectors)
+      (void)coord;
+      if (sector.state == SectorLoadState::Queued ||
+          sector.state == SectorLoadState::Loading ||
+          sector.state == SectorLoadState::ReadyToActivate)
       {
-        if (sector.state == SectorLoadState::Loaded)
-          m_scratchLoaded.push_back(coord);
-      }
-
-      std::sort(m_scratchLoaded.begin(), m_scratchLoaded.end(),
-        [&](const SectorCoord& a, const SectorCoord& b)
-        {
-          if (a == cameraSector) return false;
-          if (b == cameraSector) return true;
-
-          const int da = sectorDistanceSq(a, cameraSector);
-          const int db = sectorDistanceSq(b, cameraSector);
-          if (da != db) return da > db;
-
-          const Sector* sa = findSector(a);
-          const Sector* sb = findSector(b);
-          const uint64_t ta = sa ? sa->lastTouchedFrame : 0;
-          const uint64_t tb = sb ? sb->lastTouchedFrame : 0;
-          if (ta != tb) return ta < tb;
-          return coordLess(a, b);
-        });
-
-      for (const SectorCoord& coord : m_scratchLoaded)
-      {
-        const bool sectorOk = (budget.maxActiveSectors == 0 || m_loadedSectorCount <= budget.maxActiveSectors);
-        const bool entityOk = (budget.maxEntitiesBudget == 0 || m_loadedEntityEstimate <= budget.maxEntitiesBudget);
-        if (sectorOk && entityOk)
-          break;
-        if (coord == cameraSector)
-          continue;
-        unloadSector(coord);
+        sector.requestId++;
+        sector.state = SectorLoadState::Unloaded;
+        sector.spawns.clear();
+        sector.entities.clear();
+        sector.pendingDespawns = 0;
       }
     }
 
-    m_frameStats.loadedSectors = m_loadedSectorCount;
-    m_frameStats.loadedThisFrame = static_cast<uint32_t>(m_loadedThisFrame.size());
-    m_frameStats.unloadedThisFrame = static_cast<uint32_t>(m_unloadedThisFrame.size());
-    m_frameStats.estimatedSectorEntities = m_loadedEntityEstimate;
+    while (m_inFlightLoads > 0)
+    {
+      SectorLoadResult result{};
+      while (m_completedLoads.pop(result))
+      {
+        if (m_inFlightLoads > 0)
+          m_inFlightLoads--;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    m_completedLoads.clear();
+    m_pendingDespawns.clear();
   }
 
   Frustum frustumFromViewProj(const Mat4& viewProj)
@@ -529,6 +964,7 @@ namespace sc
       return;
 
     state->stats = {};
+    state->frameIndex++;
 
     Transform* camTransform = nullptr;
     const Entity activeCam = pickActiveCamera(world, camTransform);
@@ -543,75 +979,32 @@ namespace sc
     }
 
     const Vec3 cameraPos{ camTransform->localPos[0], camTransform->localPos[1], camTransform->localPos[2] };
-    state->stats.cameraSector = state->partition.worldToSector(cameraPos);
-    state->stats.activeRadiusSectors = state->budgets.activeRadiusSectors;
-    const uint32_t side = state->budgets.activeRadiusSectors * 2u + 1u;
-    state->stats.desiredSectors = side * side;
-
-    if (state->freezeStreaming)
-    {
-      state->partition.clearFrameDeltas();
-      state->stats.loadedSectors = state->partition.loadedSectorCount();
-      state->stats.estimatedSectorEntities = state->partition.loadedEntityEstimate();
-      return;
-    }
+    const float yaw = camTransform->localRot[1];
+    const float pitch = camTransform->localRot[0];
+    Vec3 cameraForward{};
+    cameraForward.x = std::sin(yaw) * std::cos(pitch);
+    cameraForward.y = -std::sin(pitch);
+    cameraForward.z = std::cos(yaw) * std::cos(pitch);
 
     WorldPartitionBudget budget{};
     budget.maxActiveSectors = state->budgets.maxActiveSectors;
     budget.maxEntitiesBudget = state->budgets.maxEntitiesBudget;
-    state->partition.updateActiveSet(cameraPos, state->budgets.activeRadiusSectors, budget);
+    state->partition.updateActiveSet(cameraPos,
+                                     cameraForward,
+                                     state->budgets.loadRadiusSectors,
+                                     state->budgets.unloadRadiusSectors,
+                                     budget,
+                                     state->budgets.useFrustumBias,
+                                     state->budgets.frustumBiasWeight,
+                                     !state->freezeStreaming);
 
-    uint32_t despawned = 0;
-    for (const SectorCoord& coord : state->partition.unloadedThisFrameCoords())
-    {
-      Sector* sector = state->partition.findSector(coord);
-      if (!sector)
-        continue;
-      for (const Entity e : sector->entities)
-      {
-        if (world.destroy(e))
-          despawned++;
-      }
-      sector->entities.clear();
-    }
+    if (!state->freezeStreaming)
+      state->partition.dispatchPendingLoads(state->budgets.maxConcurrentLoads);
 
-    uint32_t spawned = 0;
-    for (const SectorCoord& coord : state->partition.loadedThisFrameCoords())
-    {
-      Sector* sector = state->partition.findSector(coord);
-      if (!sector)
-        continue;
-
-      sector->entities.clear();
-      sector->entities.reserve(sector->spawns.size());
-
-      for (const SpawnRecord& rec : sector->spawns)
-      {
-        Entity e = world.create();
-        Transform& t = world.add<Transform>(e);
-        setLocal(t, rec.position, rec.rotation, rec.scale);
-
-        RenderMesh& rm = world.add<RenderMesh>(e);
-        rm.meshId = rec.meshId;
-        rm.materialId = rec.materialId;
-
-        WorldSector& ws = world.add<WorldSector>(e);
-        ws.coord = coord;
-        ws.active = true;
-
-        Bounds& b = world.add<Bounds>(e);
-        b.localAabb = rec.localBounds;
-
-        setName(world.add<Name>(e), rec.name);
-
-        sector->entities.push_back(e);
-        spawned++;
-      }
-    }
+    state->partition.pumpCompletedLoads(world, budget, state->budgets.maxActivationsPerFrame);
+    state->partition.pumpUnloadQueue(world, state->budgets.maxDespawnsPerFrame);
 
     state->stats = state->partition.frameStats();
-    state->stats.entitiesSpawned = spawned;
-    state->stats.entitiesDespawned = despawned;
   }
 
   void CullingSystem(World& world, float dt, void* user)
@@ -715,6 +1108,12 @@ namespace sc
     uint32_t emitted = 0;
     uint32_t dropped = 0;
 
+    if (state->assets && state->streaming)
+    {
+      state->assets->beginFrame(state->streaming->frameIndex);
+      state->assets->setFreezeEviction(state->streaming->freezeEviction);
+    }
+
     if (state->culling)
     {
       for (const Entity e : state->culling->visible)
@@ -731,6 +1130,11 @@ namespace sc
         }
 
         pushDrawItem(frame, e, *t, *rm);
+        if (state->assets)
+        {
+          state->assets->touchMaterial(rm->materialId);
+          state->assets->touchMesh(rm->meshId);
+        }
         emitted++;
       }
     }
@@ -744,8 +1148,21 @@ namespace sc
           return;
         }
         pushDrawItem(frame, e, t, rm);
+        if (state->assets)
+        {
+          state->assets->touchMaterial(rm.materialId);
+          state->assets->touchMesh(rm.meshId);
+        }
         emitted++;
       });
+    }
+
+    if (state->assets)
+    {
+      const uint32_t loadLimit = state->assets->residencyConfig().maxTextureLoadsPerFrame;
+      state->assets->pumpTextureLoads(loadLimit);
+      if (!state->assets->residencyConfig().freezeEviction)
+        state->assets->evictIfNeeded();
     }
 
     state->stats.drawsEmitted = emitted;

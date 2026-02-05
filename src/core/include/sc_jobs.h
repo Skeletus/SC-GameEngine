@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <type_traits>
+#include <utility>
 #include <new>
 
 namespace sc
@@ -130,6 +131,55 @@ namespace sc
 
       Kick(handle);
       return handle;
+    }
+
+    template<typename F>
+    void DispatchAsync(F&& f, uint32_t scopeId = 0xFFFFFFFFu)
+    {
+      using FnType = typename std::decay<F>::type;
+      struct Payload
+      {
+        FnType fn;
+        explicit Payload(FnType&& in) : fn(std::move(in)) {}
+      };
+
+      MallocAllocator alloc;
+      void* mem = alloc.allocate(sizeof(Payload), alignof(Payload), MemTag::Jobs, __FILE__, __LINE__);
+      if (!mem)
+      {
+        JobContext ctx{};
+        ctx.workerIndex = m_numWorkers;
+        const uint32_t scope = (scopeId == 0xFFFFFFFFu) ? m_scopeJobsExecute : scopeId;
+        { ScopedTimer frameTimer(&m_frameJobTicks); ScopedTimer scopeTimer(scope); f(ctx); }
+        m_jobsCompleted.fetch_add(1, std::memory_order_relaxed);
+        m_frameJobsCompleted.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+
+      Payload* payload = new (mem) Payload(static_cast<F&&>(f));
+      const uint32_t scope = (scopeId == 0xFFFFFFFFu) ? m_scopeJobsExecute : scopeId;
+
+      JobItem job{};
+      job.ctx.start = 0;
+      job.ctx.end = 1;
+      job.ctx.groupIndex = 0;
+      job.ctx.groupCount = 1;
+      job.fn = [](const JobContext& ctx, void* user)
+      {
+        auto* p = static_cast<Payload*>(user);
+        p->fn(ctx);
+      };
+      job.destroy = [](void* user)
+      {
+        auto* p = static_cast<Payload*>(user);
+        p->~Payload();
+        MallocAllocator a;
+        a.deallocate(p, sizeof(Payload), MemTag::Jobs);
+      };
+      job.user = payload;
+      job.scopeId = scope;
+
+      enqueue(job);
     }
 
   private:

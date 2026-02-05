@@ -109,23 +109,47 @@ namespace sc
       const float currentColor[3] = { 1.0f, 0.9f, 0.2f };
       const float neighborColor[3] = { 0.3f, 1.0f, 0.45f };
       const float loadedColor[3] = { 0.25f, 0.7f, 1.0f };
+      const float queuedColor[3] = { 0.7f, 0.7f, 0.2f };
+      const float loadingColor[3] = { 1.0f, 0.55f, 0.1f };
+      const float readyColor[3] = { 0.2f, 0.9f, 0.4f };
+      const float unloadingColor[3] = { 0.9f, 0.2f, 0.2f };
 
       for (const auto& pair : ctx->streaming->partition.sectors())
       {
         const Sector& sector = pair.second;
-        if (sector.state != SectorLoadState::Loaded)
+        if (sector.state == SectorLoadState::Unloaded)
           continue;
 
-        const int dx = sector.coord.x - cameraSector.x;
-        const int dz = sector.coord.z - cameraSector.z;
-        const int manhattan = std::abs(dx) + std::abs(dz);
-        const float* color = loadedColor;
-        if (dx == 0 && dz == 0)
-          color = currentColor;
-        else if (manhattan == 1)
-          color = neighborColor;
+        if (ctx->streaming->showSectorStateColors)
+        {
+          const float* color = loadedColor;
+          switch (sector.state)
+          {
+            case SectorLoadState::Queued: color = queuedColor; break;
+            case SectorLoadState::Loading: color = loadingColor; break;
+            case SectorLoadState::ReadyToActivate: color = readyColor; break;
+            case SectorLoadState::Active: color = loadedColor; break;
+            case SectorLoadState::Unloading: color = unloadingColor; break;
+            default: break;
+          }
+          addAabb(*draw, ctx->streaming->partition.sectorBounds(sector.coord), color);
+        }
+        else
+        {
+          if (sector.state != SectorLoadState::Active)
+            continue;
 
-        addAabb(*draw, ctx->streaming->partition.sectorBounds(sector.coord), color);
+          const int dx = sector.coord.x - cameraSector.x;
+          const int dz = sector.coord.z - cameraSector.z;
+          const int manhattan = std::abs(dx) + std::abs(dz);
+          const float* color = loadedColor;
+          if (dx == 0 && dz == 0)
+            color = currentColor;
+          else if (manhattan == 1)
+            color = neighborColor;
+
+          addAabb(*draw, ctx->streaming->partition.sectorBounds(sector.coord), color);
+        }
       }
     }
 

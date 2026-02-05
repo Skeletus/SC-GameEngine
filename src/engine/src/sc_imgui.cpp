@@ -346,17 +346,30 @@ namespace sc
     if (m_worldStreaming)
     {
       ImGui::Separator();
-      ImGui::Text("World Streaming (Static)");
+      ImGui::Text("World Streaming (Async)");
 
       ImGui::Checkbox("Freeze Streaming", &m_worldStreaming->freezeStreaming);
       if (m_culling)
         ImGui::Checkbox("Freeze Culling", &m_culling->freezeCulling);
+      ImGui::Checkbox("Freeze Eviction", &m_worldStreaming->freezeEviction);
       ImGui::Checkbox("Show Sector Bounds", &m_worldStreaming->showSectorBounds);
+      ImGui::Checkbox("Show Sector State Colors", &m_worldStreaming->showSectorStateColors);
       ImGui::Checkbox("Show Entity Bounds", &m_worldStreaming->showEntityBounds);
 
-      int activeRadius = static_cast<int>(m_worldStreaming->budgets.activeRadiusSectors);
-      if (ImGui::SliderInt("Active Radius (sectors)", &activeRadius, 0, 8))
-        m_worldStreaming->budgets.activeRadiusSectors = static_cast<uint32_t>(std::max(activeRadius, 0));
+      int loadRadius = static_cast<int>(m_worldStreaming->budgets.loadRadiusSectors);
+      if (ImGui::SliderInt("Load Radius (sectors)", &loadRadius, 0, 8))
+      {
+        m_worldStreaming->budgets.loadRadiusSectors = static_cast<uint32_t>(std::max(loadRadius, 0));
+        if (m_worldStreaming->budgets.unloadRadiusSectors <= m_worldStreaming->budgets.loadRadiusSectors)
+          m_worldStreaming->budgets.unloadRadiusSectors = m_worldStreaming->budgets.loadRadiusSectors + 1u;
+      }
+
+      int unloadRadius = static_cast<int>(m_worldStreaming->budgets.unloadRadiusSectors);
+      if (ImGui::SliderInt("Unload Radius (sectors)", &unloadRadius, 1, 12))
+      {
+        const uint32_t minUnload = m_worldStreaming->budgets.loadRadiusSectors + 1u;
+        m_worldStreaming->budgets.unloadRadiusSectors = static_cast<uint32_t>(std::max(unloadRadius, (int)minUnload));
+      }
 
       int maxSectors = static_cast<int>(m_worldStreaming->budgets.maxActiveSectors);
       if (ImGui::SliderInt("Max Active Sectors", &maxSectors, 1, 256))
@@ -370,6 +383,22 @@ namespace sc
       if (ImGui::SliderInt("Max Draws Budget", &maxDraws, 128, 50000))
         m_worldStreaming->budgets.maxDrawsBudget = static_cast<uint32_t>(std::max(maxDraws, 128));
 
+      int maxConcurrentLoads = static_cast<int>(m_worldStreaming->budgets.maxConcurrentLoads);
+      if (ImGui::SliderInt("Max Concurrent Loads", &maxConcurrentLoads, 1, 16))
+        m_worldStreaming->budgets.maxConcurrentLoads = static_cast<uint32_t>(std::max(maxConcurrentLoads, 1));
+
+      int maxActivations = static_cast<int>(m_worldStreaming->budgets.maxActivationsPerFrame);
+      if (ImGui::SliderInt("Max Activations/Frame", &maxActivations, 1, 32))
+        m_worldStreaming->budgets.maxActivationsPerFrame = static_cast<uint32_t>(std::max(maxActivations, 1));
+
+      int maxDespawns = static_cast<int>(m_worldStreaming->budgets.maxDespawnsPerFrame);
+      if (ImGui::SliderInt("Max Despawns/Frame", &maxDespawns, 1, 1024))
+        m_worldStreaming->budgets.maxDespawnsPerFrame = static_cast<uint32_t>(std::max(maxDespawns, 1));
+
+      ImGui::Checkbox("Frustum Bias", &m_worldStreaming->budgets.useFrustumBias);
+      if (m_worldStreaming->budgets.useFrustumBias)
+        ImGui::SliderFloat("Frustum Bias Weight", &m_worldStreaming->budgets.frustumBiasWeight, 0.0f, 8.0f, "%.2f");
+
       int boundsLimit = static_cast<int>(m_worldStreaming->entityBoundsLimit);
       if (ImGui::SliderInt("Entity Bounds Limit", &boundsLimit, 0, 512))
         m_worldStreaming->entityBoundsLimit = static_cast<uint32_t>(std::max(boundsLimit, 0));
@@ -378,6 +407,12 @@ namespace sc
       ImGui::Text("Camera Sector: (%d, %d)", ws.cameraSector.x, ws.cameraSector.z);
       ImGui::Text("Loaded / Desired: %u / %u", ws.loadedSectors, ws.desiredSectors);
       ImGui::Text("Sectors this frame: +%u / -%u", ws.loadedThisFrame, ws.unloadedThisFrame);
+      ImGui::Text("Sector states: queued %u  loading %u  ready %u  active %u  unloading %u",
+                  ws.queuedSectors, ws.loadingSectors, ws.readySectors, ws.activeSectors, ws.unloadingSectors);
+      ImGui::Text("Loads: completed %u  avg %.2f ms  max %.2f ms",
+                  ws.completedLoads, ws.avgLoadMs, ws.maxLoadMs);
+      ImGui::Text("Activations / Despawns: %u / %u", ws.activations, ws.despawns);
+      ImGui::Text("Pump loads: %.2f ms  unloads: %.2f ms", ws.pumpLoadsMs, ws.pumpUnloadsMs);
       ImGui::Text("Entities this frame: +%u / -%u", ws.entitiesSpawned, ws.entitiesDespawned);
       ImGui::Text("Estimated sector entities: %u", ws.estimatedSectorEntities);
 
@@ -417,6 +452,14 @@ namespace sc
     ImGui::Text("CPU bytes: %llu  GPU bytes(est): %llu",
                 static_cast<unsigned long long>(m_assetStats.cpuBytes),
                 static_cast<unsigned long long>(m_assetStats.gpuBytes));
+    ImGui::Text("Resident textures: %u  Queued loads: %u  Evictions: %u",
+                m_assetStats.residentTextures,
+                m_assetStats.queuedTextureLoads,
+                m_assetStats.evictions);
+    ImGui::Text("GPU budget: %llu  Used: %llu  Eviction: %.2f ms",
+                static_cast<unsigned long long>(m_assetStats.gpuBudgetBytes),
+                static_cast<unsigned long long>(m_assetStats.gpuResidentBytes),
+                m_assetStats.evictionMs);
     ImGui::Text("Texture cache H/M: %llu / %llu",
                 static_cast<unsigned long long>(m_assetStats.textureCacheHits),
                 static_cast<unsigned long long>(m_assetStats.textureCacheMisses));

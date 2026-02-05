@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -48,6 +49,10 @@ namespace sc
     uint64_t cpuBytes = 0;
     uint64_t gpuBytes = 0;
     bool fromDisk = false;
+    bool resident = false;
+    bool pinned = false;
+    uint64_t lastUsedFrame = 0;
+    bool loading = false;
 
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -68,6 +73,12 @@ namespace sc
     uint64_t meshCacheMisses = 0;
     uint64_t materialCacheHits = 0;
     uint64_t materialCacheMisses = 0;
+    uint32_t residentTextures = 0;
+    uint32_t queuedTextureLoads = 0;
+    uint32_t evictions = 0;
+    uint64_t gpuBudgetBytes = 0;
+    uint64_t gpuResidentBytes = 0;
+    float evictionMs = 0.0f;
     bool samplerAnisotropyEnabled = false;
     float samplerMaxAnisotropy = 1.0f;
   };
@@ -93,6 +104,14 @@ namespace sc
     float samplerMaxAnisotropy = 1.0f;
   };
 
+  struct AssetResidencyConfig
+  {
+    uint64_t gpuBudgetBytes = 256ull * 1024ull * 1024ull;
+    uint32_t maxResidentTextures = 512u;
+    uint32_t maxTextureLoadsPerFrame = 2u;
+    bool freezeEviction = false;
+  };
+
   class AssetManager
   {
   public:
@@ -112,6 +131,17 @@ namespace sc
     AssetStatsSnapshot stats() const;
     std::vector<TextureDebugEntry> textureDebugEntries() const;
 
+    const AssetResidencyConfig& residencyConfig() const { return m_residency; }
+    void setResidencyConfig(const AssetResidencyConfig& cfg) { m_residency = cfg; }
+    void setFreezeEviction(bool freeze) { m_residency.freezeEviction = freeze; }
+
+    void beginFrame(uint64_t frameIndex);
+    void touchMaterial(MaterialHandle handle);
+    void touchMesh(MeshHandle /*handle*/) {}
+    void requestTextureResident(TextureHandle handle);
+    void pumpTextureLoads(uint32_t maxLoadsPerFrame);
+    void evictIfNeeded();
+
   private:
     bool createTextureFromPixels(const std::string& debugPath,
                                  AssetId assetId,
@@ -120,6 +150,9 @@ namespace sc
                                  uint32_t height,
                                  bool fromDisk,
                                  TextureHandle& outHandle);
+    bool reloadTexture(TextureHandle handle);
+    void destroyTextureGpu(TextureAsset& texture);
+    void refreshMaterialsForTexture(TextureHandle handle);
     bool uploadTexturePixels(const unsigned char* rgbaPixels,
                              uint32_t width,
                              uint32_t height,
@@ -138,6 +171,7 @@ namespace sc
     float m_samplerMaxAnisotropy = 1.0f;
 
     TextureHandle m_defaultWhiteTexture = kInvalidTextureHandle;
+    TextureHandle m_placeholderTexture = kInvalidTextureHandle;
 
     std::vector<TextureAsset> m_textures;
     std::vector<Material> m_materials;
@@ -152,5 +186,12 @@ namespace sc
     uint64_t m_meshCacheMisses = 0;
     uint64_t m_materialCacheHits = 0;
     uint64_t m_materialCacheMisses = 0;
+
+    AssetResidencyConfig m_residency{};
+    uint64_t m_frameIndex = 0;
+    uint64_t m_evictionsThisFrame = 0;
+    uint64_t m_queuedLoadsThisFrame = 0;
+    uint64_t m_evictionTicks = 0;
+    std::deque<TextureHandle> m_textureLoadQueue;
   };
 }

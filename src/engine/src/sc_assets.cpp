@@ -2,6 +2,7 @@
 
 #include "sc_log.h"
 #include "sc_paths.h"
+#include "sc_time.h"
 
 #include <algorithm>
 #include <array>
@@ -208,6 +209,12 @@ namespace sc
       return false;
     }
     m_defaultWhiteTexture = whiteHandle;
+
+    TextureHandle placeholder = createFallbackTexture("__placeholder__", fnv1a64("__placeholder__"));
+    if (placeholder == kInvalidTextureHandle)
+      placeholder = m_defaultWhiteTexture;
+    m_placeholderTexture = placeholder;
+
     return true;
   }
 
@@ -215,10 +222,7 @@ namespace sc
   {
     for (TextureAsset& texture : m_textures)
     {
-      if (texture.sampler) vkDestroySampler(m_device, texture.sampler, nullptr);
-      if (texture.view) vkDestroyImageView(m_device, texture.view, nullptr);
-      if (texture.image) vkDestroyImage(m_device, texture.image, nullptr);
-      if (texture.memory) vkFreeMemory(m_device, texture.memory, nullptr);
+      destroyTextureGpu(texture);
       texture = TextureAsset{};
     }
 
@@ -228,6 +232,8 @@ namespace sc
     m_meshCache.clear();
     m_materialCache.clear();
     m_defaultWhiteTexture = kInvalidTextureHandle;
+    m_placeholderTexture = kInvalidTextureHandle;
+    m_textureLoadQueue.clear();
   }
 
   void AssetManager::setCommandContext(VkCommandPool commandPool, VkQueue graphicsQueue)
@@ -246,7 +252,15 @@ namespace sc
     if (it != m_textureCache.end())
     {
       ++m_textureCacheHits;
-      return it->second;
+      const TextureHandle handle = it->second;
+      if (handle < m_textures.size())
+      {
+        TextureAsset& tex = m_textures[handle];
+        tex.lastUsedFrame = m_frameIndex;
+        if (!tex.resident)
+          requestTextureResident(handle);
+      }
+      return handle;
     }
 
     ++m_textureCacheMisses;
@@ -329,6 +343,13 @@ namespace sc
     const MaterialHandle handle = static_cast<MaterialHandle>(m_materials.size());
     m_materials.push_back(material);
     m_materialCache[key] = handle;
+
+    if (material.desc.albedo < m_textures.size())
+    {
+      TextureAsset& tex = m_textures[material.desc.albedo];
+      if (!tex.resident)
+        requestTextureResident(material.desc.albedo);
+    }
     return handle;
   }
 
@@ -365,7 +386,18 @@ namespace sc
     {
       snap.cpuBytes += texture.cpuBytes;
       snap.gpuBytes += texture.gpuBytes;
+      if (texture.resident)
+      {
+        snap.residentTextures++;
+        snap.gpuResidentBytes += texture.gpuBytes;
+      }
     }
+
+    snap.queuedTextureLoads = static_cast<uint32_t>(m_textureLoadQueue.size());
+    snap.evictions = static_cast<uint32_t>(m_evictionsThisFrame);
+    snap.gpuBudgetBytes = m_residency.gpuBudgetBytes;
+    snap.evictionMs = static_cast<float>(ticksToSeconds(m_evictionTicks) * 1000.0);
+
     return snap;
   }
 
@@ -388,6 +420,164 @@ namespace sc
     return out;
   }
 
+  void AssetManager::beginFrame(uint64_t frameIndex)
+  {
+    m_frameIndex = frameIndex;
+    m_evictionsThisFrame = 0;
+    m_queuedLoadsThisFrame = 0;
+    m_evictionTicks = 0;
+  }
+
+  void AssetManager::touchMaterial(MaterialHandle handle)
+  {
+    if (handle >= m_materials.size())
+      return;
+
+    const Material& mat = m_materials[handle];
+    const TextureHandle texHandle = mat.desc.albedo;
+    if (texHandle >= m_textures.size())
+      return;
+
+    TextureAsset& tex = m_textures[texHandle];
+    tex.lastUsedFrame = m_frameIndex;
+    if (!tex.resident)
+      requestTextureResident(texHandle);
+  }
+
+  void AssetManager::requestTextureResident(TextureHandle handle)
+  {
+    if (handle >= m_textures.size())
+      return;
+
+    TextureAsset& tex = m_textures[handle];
+    if (tex.resident || tex.loading)
+      return;
+    if (!tex.fromDisk)
+    {
+      tex.resident = true;
+      tex.loading = false;
+      tex.pinned = true;
+      return;
+    }
+
+    tex.loading = true;
+    m_textureLoadQueue.push_back(handle);
+    m_queuedLoadsThisFrame++;
+  }
+
+  void AssetManager::pumpTextureLoads(uint32_t maxLoadsPerFrame)
+  {
+    const uint32_t limit = maxLoadsPerFrame == 0 ? 0 : maxLoadsPerFrame;
+    uint32_t loaded = 0;
+
+    while (loaded < limit && !m_textureLoadQueue.empty())
+    {
+      const TextureHandle handle = m_textureLoadQueue.front();
+      m_textureLoadQueue.pop_front();
+
+      if (handle >= m_textures.size())
+        continue;
+
+      TextureAsset& tex = m_textures[handle];
+      if (tex.resident)
+      {
+        tex.loading = false;
+        continue;
+      }
+
+      if (!reloadTexture(handle))
+      {
+        tex.loading = false;
+        continue;
+      }
+
+      tex.loading = false;
+      tex.lastUsedFrame = m_frameIndex;
+      refreshMaterialsForTexture(handle);
+      loaded++;
+    }
+  }
+
+  void AssetManager::evictIfNeeded()
+  {
+    if (m_residency.freezeEviction)
+      return;
+
+    const Tick start = nowTicks();
+
+    uint64_t gpuUsed = 0;
+    uint32_t residentCount = 0;
+    for (const TextureAsset& tex : m_textures)
+    {
+      if (tex.resident)
+      {
+        gpuUsed += tex.gpuBytes;
+        residentCount++;
+      }
+    }
+
+    const bool overBytes = (m_residency.gpuBudgetBytes > 0 && gpuUsed > m_residency.gpuBudgetBytes);
+    const bool overCount = (m_residency.maxResidentTextures > 0 && residentCount > m_residency.maxResidentTextures);
+    if (!overBytes && !overCount)
+    {
+      m_evictionTicks += nowTicks() - start;
+      return;
+    }
+
+    struct Candidate
+    {
+      TextureHandle handle = kInvalidTextureHandle;
+      uint64_t lastUsed = 0;
+    };
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(m_textures.size());
+    for (TextureHandle i = 0; i < m_textures.size(); ++i)
+    {
+      const TextureAsset& tex = m_textures[i];
+      if (!tex.resident)
+        continue;
+      if (tex.pinned)
+        continue;
+      if (!tex.fromDisk)
+        continue;
+      candidates.push_back({ i, tex.lastUsedFrame });
+    }
+
+    std::sort(candidates.begin(), candidates.end(),
+      [&](const Candidate& a, const Candidate& b)
+      {
+        if (a.lastUsed != b.lastUsed) return a.lastUsed < b.lastUsed;
+        return a.handle < b.handle;
+      });
+
+    for (const Candidate& c : candidates)
+    {
+      const bool stillOverBytes = (m_residency.gpuBudgetBytes > 0 && gpuUsed > m_residency.gpuBudgetBytes);
+      const bool stillOverCount = (m_residency.maxResidentTextures > 0 && residentCount > m_residency.maxResidentTextures);
+      if (!stillOverBytes && !stillOverCount)
+        break;
+
+      TextureAsset& tex = m_textures[c.handle];
+      const uint64_t bytes = tex.gpuBytes;
+      destroyTextureGpu(tex);
+      tex.resident = false;
+      tex.loading = false;
+      tex.lastUsedFrame = 0;
+      if (residentCount > 0)
+        residentCount--;
+      if (gpuUsed > bytes)
+        gpuUsed -= bytes;
+      else
+        gpuUsed = 0;
+
+      refreshMaterialsForTexture(c.handle);
+      m_evictionsThisFrame++;
+    }
+
+    m_evictionTicks += nowTicks() - start;
+  }
+
   bool AssetManager::createTextureFromPixels(const std::string& debugPath,
                                              AssetId assetId,
                                              const unsigned char* rgbaPixels,
@@ -405,6 +595,10 @@ namespace sc
     texture.cpuBytes = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4ull;
     texture.gpuBytes = texture.cpuBytes;
     texture.fromDisk = fromDisk;
+    texture.resident = true;
+    texture.pinned = !fromDisk;
+    texture.lastUsedFrame = m_frameIndex;
+    texture.loading = false;
 
     if (!uploadTexturePixels(rgbaPixels, width, height, texture))
       return false;
@@ -412,6 +606,69 @@ namespace sc
     outHandle = static_cast<TextureHandle>(m_textures.size());
     m_textures.push_back(std::move(texture));
     return true;
+  }
+
+  bool AssetManager::reloadTexture(TextureHandle handle)
+  {
+    if (handle >= m_textures.size())
+      return false;
+
+    TextureAsset& texture = m_textures[handle];
+    if (texture.path.empty())
+      return false;
+
+    const std::filesystem::path resolvedPath = resolveAssetPath(texture.path);
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* pixels = stbi_load(resolvedPath.string().c_str(), &width, &height, &channels, STBI_rgb_alpha);
+    if (!pixels || width <= 0 || height <= 0)
+    {
+      sc::log(LogLevel::Warn, "AssetManager: failed to reload texture '%s'.", resolvedPath.string().c_str());
+      if (pixels)
+        stbi_image_free(pixels);
+      return false;
+    }
+
+    destroyTextureGpu(texture);
+
+    texture.width = static_cast<uint32_t>(width);
+    texture.height = static_cast<uint32_t>(height);
+    texture.mipLevels = 1;
+    texture.cpuBytes = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4ull;
+    texture.gpuBytes = texture.cpuBytes;
+    texture.fromDisk = true;
+
+    const bool ok = uploadTexturePixels(pixels, static_cast<uint32_t>(width), static_cast<uint32_t>(height), texture);
+    stbi_image_free(pixels);
+    if (!ok)
+      return false;
+
+    texture.resident = true;
+    return true;
+  }
+
+  void AssetManager::destroyTextureGpu(TextureAsset& texture)
+  {
+    if (texture.sampler) vkDestroySampler(m_device, texture.sampler, nullptr);
+    if (texture.view) vkDestroyImageView(m_device, texture.view, nullptr);
+    if (texture.image) vkDestroyImage(m_device, texture.image, nullptr);
+    if (texture.memory) vkFreeMemory(m_device, texture.memory, nullptr);
+    texture.sampler = VK_NULL_HANDLE;
+    texture.view = VK_NULL_HANDLE;
+    texture.image = VK_NULL_HANDLE;
+    texture.memory = VK_NULL_HANDLE;
+    texture.gpuBytes = 0;
+    texture.resident = false;
+  }
+
+  void AssetManager::refreshMaterialsForTexture(TextureHandle handle)
+  {
+    for (Material& material : m_materials)
+    {
+      if (material.desc.albedo == handle)
+        writeMaterialDescriptor(material);
+    }
   }
 
   bool AssetManager::uploadTexturePixels(const unsigned char* rgbaPixels,
@@ -503,6 +760,8 @@ namespace sc
   bool AssetManager::writeMaterialDescriptor(Material& material)
   {
     const TextureAsset* texture = getTexture(material.desc.albedo);
+    if (!texture || !texture->resident)
+      texture = getTexture(m_placeholderTexture);
     if (!texture)
       return false;
 
