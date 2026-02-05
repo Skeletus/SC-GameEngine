@@ -1,6 +1,7 @@
 #include "sc_vk.h"
 #include "sc_log.h"
 #include "sc_paths.h"
+#include "sc_physics.h"
 
 #include <SDL.h>
 #include <SDL_vulkan.h>
@@ -1422,6 +1423,11 @@ namespace sc
                                             RenderPrepStreamingState* renderPrep)
   {
     m_debugUI.setWorldStreamingContext(streaming, culling, renderPrep);
+  }
+
+  void VkRenderer::setPhysicsContext(PhysicsDebugState* physics)
+  {
+    m_debugUI.setPhysicsContext(physics);
   }
 
   void VkRenderer::buildAssetUiSnapshot()

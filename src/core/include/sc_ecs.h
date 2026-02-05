@@ -397,6 +397,9 @@ namespace sc
     Entity cube{};
     Entity camera{};
     Entity root{};
+    bool overrideCamera = false;
+    float cameraPos[3] = { 0.0f, 0.0f, 5.0f };
+    float cameraRot[3] = { 0.0f, 0.0f, 0.0f };
   };
 
   struct RenderPrepState

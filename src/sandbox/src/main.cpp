@@ -7,6 +7,7 @@
 #include "sc_scheduler.h"
 #include "sc_debug_draw.h"
 #include "sc_world_partition.h"
+#include "sc_physics.h"
 
 #include <SDL.h>
 #include <thread>
@@ -72,6 +73,15 @@ int main()
   worldCfg.propsPerSectorMax = 34u;
   worldCfg.includeGroundPlane = true;
   worldStreaming.partition.configure(worldCfg);
+
+  const float sectorSize = worldStreaming.partition.config().sectorSizeMeters;
+  spawner.overrideCamera = true;
+  spawner.cameraPos[0] = sectorSize * 0.5f;
+  spawner.cameraPos[1] = 6.0f;
+  spawner.cameraPos[2] = sectorSize * 0.5f + 12.0f;
+  spawner.cameraRot[0] = 0.0f;
+  spawner.cameraRot[1] = 3.14159265f;
+  spawner.cameraRot[2] = 0.0f;
   worldStreaming.budgets.loadRadiusSectors = 2u;
   worldStreaming.budgets.unloadRadiusSectors = 3u;
   worldStreaming.budgets.maxActiveSectors = 25u;
@@ -105,17 +115,54 @@ int main()
   debugDrawState.streaming = &worldStreaming;
   debugDrawState.culling = &culling;
 
+  sc::PhysicsWorld physicsWorld{};
+  physicsWorld.init();
+
+  sc::PhysicsDebugState physicsDebug{};
+
+  sc::PhysicsSyncState physicsSync{};
+  physicsSync.world = &physicsWorld;
+  physicsSync.debug = &physicsDebug;
+  physicsSync.tracked.reserve(4096);
+
+  sc::PhysicsDebugDrawState physicsDraw{};
+  physicsDraw.world = &physicsWorld;
+  physicsDraw.debug = &physicsDebug;
+  physicsDraw.draw = &debugDraw;
+
+  sc::PhysicsDemoState physicsDemo{};
+  physicsDemo.debug = &physicsDebug;
+  {
+    physicsDemo.basePos[0] = sectorSize * 0.5f;
+    physicsDemo.basePos[1] = 6.0f;
+    physicsDemo.basePos[2] = sectorSize * 0.5f;
+  }
+
+  const sc::TextureHandle checkerTex = vk.assets().loadTexture2D("textures/checker.ppm");
+  sc::MaterialDesc checkerDesc{};
+  checkerDesc.albedo = checkerTex;
+  checkerDesc.unlit = false;
+  checkerDesc.transparent = false;
+  const sc::MaterialHandle checkerMat = vk.assets().createMaterial(checkerDesc);
+  physicsDemo.materialId = (checkerMat != sc::kInvalidMaterialHandle) ? checkerMat : 0u;
+
   scheduler.addSystem("Spawner", sc::SystemPhase::Simulation, sc::SpawnerSystem, &spawner);
   scheduler.addSystem("WorldStreaming", sc::SystemPhase::Simulation, sc::WorldStreamingSystem, &worldStreaming, { "Spawner" });
-  scheduler.addSystem("Transform", sc::SystemPhase::Simulation, sc::TransformSystem, nullptr, { "WorldStreaming" });
-  scheduler.addSystem("Camera", sc::SystemPhase::Simulation, sc::CameraSystem, &cameraState, { "Transform" });
+  scheduler.addSystem("PhysicsDemo", sc::SystemPhase::Simulation, sc::PhysicsDemoSystem, &physicsDemo, { "WorldStreaming" });
+  scheduler.addSystem("PhysicsSync", sc::SystemPhase::FixedUpdate, sc::PhysicsSyncSystem, &physicsSync, { "PhysicsDemo" });
+  scheduler.addSystem("Transform", sc::SystemPhase::RenderPrep, sc::TransformSystem, nullptr, { "PhysicsDemo" });
+  scheduler.addSystem("Camera", sc::SystemPhase::RenderPrep, sc::CameraSystem, &cameraState, { "Transform" });
   scheduler.addSystem("Culling", sc::SystemPhase::RenderPrep, sc::CullingSystem, &culling, { "Camera" });
   scheduler.addSystem("RenderPrep", sc::SystemPhase::RenderPrep, sc::RenderPrepStreamingSystem, &renderPrep, { "Culling" });
   scheduler.addSystem("DebugDraw", sc::SystemPhase::RenderPrep, sc::DebugDrawSystem, &debugDrawState, { "RenderPrep" });
+  scheduler.addSystem("PhysicsDebugDraw", sc::SystemPhase::RenderPrep, sc::PhysicsDebugDrawSystem, &physicsDraw, { "DebugDraw" });
   scheduler.addSystem("Debug", sc::SystemPhase::Render, sc::DebugSystem, nullptr, { "DebugDraw" });
   scheduler.finalize();
 
   sc::Tick lastTicks = sc::nowTicks();
+  float fixedAccumulator = 0.0f;
+  const float fixedDt = 1.0f / 60.0f;
+  const uint32_t maxFixedSteps = 4;
 
   while (app.pump())
   {
@@ -132,7 +179,30 @@ int main()
     lastTicks = now;
 
     cameraState.aspect = vk.swapchainAspect();
-    scheduler.tick(world, dt);
+    float fixedStepDt = fixedDt;
+    uint32_t fixedSteps = 0;
+
+    if (!physicsDebug.pausePhysics)
+    {
+      fixedAccumulator += dt;
+      const float maxAccum = fixedDt * (float)maxFixedSteps;
+      if (fixedAccumulator > maxAccum)
+        fixedAccumulator = maxAccum;
+
+      while (fixedAccumulator >= fixedDt && fixedSteps < maxFixedSteps)
+      {
+        fixedAccumulator -= fixedDt;
+        fixedSteps++;
+      }
+    }
+    else
+    {
+      fixedAccumulator = 0.0f;
+      fixedSteps = 1;
+      fixedStepDt = 0.0f;
+    }
+
+    scheduler.tick(world, dt, fixedSteps, fixedStepDt);
     jobs.publishFrameTelemetry();
 
     vk.setTelemetry(jobs.getTelemetrySnapshot(), sc::memtrack_snapshot());
@@ -141,12 +211,14 @@ int main()
     vk.setDebugWorld(&world, spawner.camera, spawner.triangle, spawner.cube, spawner.root);
     vk.setWorldStreamingContext(&worldStreaming, &culling, &renderPrep);
     vk.setDebugDraw(&debugDraw);
+    vk.setPhysicsContext(&physicsDebug);
 
     if (vk.beginFrame())
       vk.endFrame();
   }
 
   worldStreaming.partition.shutdownStreaming();
+  physicsWorld.shutdown();
   jobs.shutdown();
   vk.shutdown();
   app.shutdown();

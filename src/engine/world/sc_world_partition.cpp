@@ -3,6 +3,7 @@
 #include "sc_jobs.h"
 #include "sc_assets.h"
 #include "sc_paths.h"
+#include "sc_physics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -760,6 +761,16 @@ namespace sc
 
         Bounds& b = world.add<Bounds>(e);
         b.localAabb = rec.localBounds;
+
+        Collider& col = world.add<Collider>(e);
+        col.type = ColliderType::Box;
+        col.halfExtents[0] = (rec.localBounds.max.x - rec.localBounds.min.x) * 0.5f;
+        col.halfExtents[1] = (rec.localBounds.max.y - rec.localBounds.min.y) * 0.5f;
+        col.halfExtents[2] = (rec.localBounds.max.z - rec.localBounds.min.z) * 0.5f;
+
+        RigidBody& rb = world.add<RigidBody>(e);
+        rb.type = RigidBodyType::Static;
+        rb.mass = 0.0f;
 
         setName(world.add<Name>(e), rec.name);
 

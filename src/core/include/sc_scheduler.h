@@ -13,6 +13,7 @@ namespace sc
   {
     Input = 0,
     Simulation,
+    FixedUpdate,
     RenderPrep,
     Render,
     Count
@@ -43,7 +44,7 @@ namespace sc
                    std::initializer_list<const char*> deps = {});
 
     void finalize();
-    void tick(World& world, float dt);
+    void tick(World& world, float dt, uint32_t fixedSteps = 0, float fixedDt = 0.0f);
 
     SchedulerStatsSnapshot statsSnapshot() const;
 

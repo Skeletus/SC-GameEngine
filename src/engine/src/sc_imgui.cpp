@@ -1,6 +1,7 @@
 #include "sc_imgui.h"
 #include "sc_log.h"
 #include "sc_world_partition.h"
+#include "sc_physics.h"
 
 #include <SDL.h>
 
@@ -443,6 +444,40 @@ namespace sc
         ImGui::Text("Sector budget rejections: %u", ws.rejectedBySectorBudget);
       if (entityBudgetExceeded)
         ImGui::Text("Entity budget rejections: %u", ws.rejectedByEntityBudget);
+    }
+
+    if (m_physics)
+    {
+      ImGui::Separator();
+      ImGui::Text("Physics");
+      ImGui::Checkbox("Show Physics Debug", &m_physics->showPhysicsDebug);
+      ImGui::Checkbox("Show Colliders", &m_physics->showColliders);
+      ImGui::Checkbox("Pause Physics", &m_physics->pausePhysics);
+
+      if (ImGui::Button("Raycast"))
+        m_physics->requestRaycast = true;
+      ImGui::SameLine();
+      if (ImGui::Button("Reset Physics Demo"))
+        m_physics->requestResetDemo = true;
+
+      ImGui::SliderFloat("Raycast Max Dist", &m_physics->rayMaxDistance, 5.0f, 500.0f, "%.1f");
+
+      const PhysicsStats& ps = m_physics->stats;
+      ImGui::Text("Bodies: dynamic %u  kinematic %u  static %u",
+                  ps.dynamicBodies, ps.kinematicBodies, ps.staticColliders);
+      ImGui::Text("Broadphase proxies: %u", ps.broadphaseProxies);
+      ImGui::Text("Step: %.3f ms", ps.stepMs);
+
+      if (m_physics->lastRayHit.hit)
+      {
+        ImGui::Text("Last Ray Hit: entity %u  dist %.2f",
+                    m_physics->lastRayHit.entity.index(),
+                    m_physics->lastRayHit.distance);
+      }
+      else
+      {
+        ImGui::Text("Last Ray Hit: none");
+      }
     }
 
     ImGui::Separator();

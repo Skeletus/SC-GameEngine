@@ -7,14 +7,21 @@ target_sources(sc_engine
     src/sc_debug_draw.cpp
     src/sc_imgui.cpp
     src/sc_vk.cpp
+    physics/sc_physics.cpp
     world/sc_world_partition.cpp
 )
 
 target_include_directories(sc_engine
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/physics
     ${CMAKE_CURRENT_SOURCE_DIR}/world
     ${CMAKE_SOURCE_DIR}/third_party
+)
+
+target_include_directories(sc_engine
+  PRIVATE
+    ${bullet3_SOURCE_DIR}/src
 )
 
 target_link_libraries(sc_engine
@@ -24,6 +31,9 @@ target_link_libraries(sc_engine
     Vulkan::Vulkan
   PRIVATE
     imgui
+    BulletDynamics
+    BulletCollision
+    LinearMath
 )
 
 if (SC_ENABLE_WARNINGS)

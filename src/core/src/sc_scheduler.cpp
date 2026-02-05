@@ -47,7 +47,7 @@ namespace sc
     m_ready.reserve(m_systems.size());
   }
 
-  void Scheduler::tick(World& world, float dt)
+  void Scheduler::tick(World& world, float dt, uint32_t fixedSteps, float fixedDt)
   {
     if (m_systems.empty())
       return;
@@ -59,6 +59,18 @@ namespace sc
 
     runPhase(SystemPhase::Input, world, dt);
     runPhase(SystemPhase::Simulation, world, dt);
+
+    if (fixedSteps > 0)
+    {
+      const auto& fixedList = m_phaseLists[(uint32_t)SystemPhase::FixedUpdate];
+      for (uint32_t step = 0; step < fixedSteps; ++step)
+      {
+        for (uint32_t idx : fixedList)
+          m_completed[idx] = 0;
+        runPhase(SystemPhase::FixedUpdate, world, fixedDt);
+      }
+    }
+
     runPhase(SystemPhase::RenderPrep, world, dt);
     runPhase(SystemPhase::Render, world, dt);
 
@@ -130,7 +142,7 @@ namespace sc
     ScopedTimer scopeTimer(sys.scopeId);
     sys.fn(world, dt, sys.user);
     const Tick end = nowTicks();
-    sys.frameTicks = end - start;
+    sys.frameTicks += (end - start);
   }
 
   bool Scheduler::depsReady(const SystemRecord& sys) const

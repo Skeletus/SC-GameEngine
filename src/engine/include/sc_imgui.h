@@ -19,6 +19,7 @@ namespace sc
   struct WorldStreamingState;
   struct CullingState;
   struct RenderPrepStreamingState;
+  struct PhysicsDebugState;
 
   class DebugUI
   {
@@ -48,6 +49,7 @@ namespace sc
     void setWorldStreamingContext(WorldStreamingState* streaming,
                                   CullingState* culling,
                                   RenderPrepStreamingState* renderPrep);
+    void setPhysicsContext(PhysicsDebugState* physics) { m_physics = physics; }
     void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; }
     void setAssetPanelData(const AssetStatsSnapshot& stats,
                            const std::vector<std::string>& labels,
@@ -100,6 +102,7 @@ namespace sc
     CullingState* m_culling = nullptr;
     RenderPrepStreamingState* m_renderPrepStreaming = nullptr;
     DebugDraw* m_debugDraw = nullptr;
+    PhysicsDebugState* m_physics = nullptr;
 
     AssetStatsSnapshot m_assetStats{};
     std::vector<std::string> m_assetLabels;

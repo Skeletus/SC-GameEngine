@@ -321,7 +321,10 @@ namespace sc
       state->camera = world.create();
       {
         Transform& t = world.add<Transform>(state->camera);
-        setLocalPosition(t, 0.0f, 0.0f, 5.0f);
+        if (state->overrideCamera)
+          setLocal(t, state->cameraPos, state->cameraRot, t.localScale);
+        else
+          setLocalPosition(t, 0.0f, 0.0f, 5.0f);
         Camera& cam = world.add<Camera>(state->camera);
         cam.active = true;
         setName(world.add<Name>(state->camera), "MainCamera");
