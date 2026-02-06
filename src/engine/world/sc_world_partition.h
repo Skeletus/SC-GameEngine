@@ -196,6 +196,8 @@ namespace sc
     SectorCoord worldToSector(const Vec3& pos) const;
     AABB sectorBounds(const SectorCoord& coord) const;
 
+    void setPinnedCenters(const std::vector<SectorCoord>& centers, uint32_t radius);
+
     Sector& ensureSectorLoaded(const SectorCoord& coord);
     bool unloadSector(const SectorCoord& coord);
 
@@ -235,6 +237,7 @@ namespace sc
     bool readSectorFile(const SectorCoord& coord, std::vector<SpawnRecord>& outSpawns) const;
     void queueUnloadEntities(Sector& sector);
     bool isSectorDesired(const SectorCoord& coord) const;
+    bool isSectorPinned(const SectorCoord& coord) const;
     float sectorPriority(const SectorCoord& coord, const SectorCoord& cameraSector, const Vec3& cameraForward, float frustumBiasWeight, bool useFrustumBias) const;
 
   private:
@@ -247,6 +250,9 @@ namespace sc
     std::vector<SectorCoord> m_scratchUnload;
     std::vector<SectorCoord> m_scratchLoaded;
     std::vector<SectorCoord> m_scratchReady;
+    std::vector<SectorCoord> m_pinnedCenters;
+    std::vector<SectorCoord> m_pinnedExpanded;
+    uint32_t m_pinnedRadius = 0;
     WorldPartitionFrameStats m_frameStats{};
     uint64_t m_frameCounter = 0;
     uint32_t m_activeSectorCount = 0;
@@ -304,6 +310,8 @@ namespace sc
     bool showSectorStateColors = false;
     bool showEntityBounds = false;
     uint32_t entityBoundsLimit = 96u;
+    std::vector<SectorCoord> pinnedCenters;
+    uint32_t pinnedRadius = 1u;
   };
 
   struct CullingStats

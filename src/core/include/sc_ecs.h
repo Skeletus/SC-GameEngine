@@ -110,6 +110,37 @@ namespace sc
     uint32_t materialId = 0;
   };
 
+  struct VehicleComponent
+  {
+    float mass = 1200.0f;
+    float engineForce = 8000.0f;
+    float maxSpeed = 45.0f;          // m/s
+    float brakeForce = 12000.0f;
+    float handbrakeForce = 8000.0f;
+
+    float maxSteerAngle = 0.55f;     // radians
+    float steerResponse = 6.0f;      // 1/sec
+
+    float suspensionRestLength = 0.35f;
+    float suspensionStiffness = 20.0f;
+    float dampingCompression = 2.3f;
+    float dampingRelaxation = 4.4f;
+
+    float wheelRadius = 0.35f;
+    float wheelWidth = 0.25f;
+
+    // Offset from visual origin to center of mass (COM = visual + offset)
+    float centerOfMassOffset[3] = { 0.0f, -0.35f, 0.0f };
+  };
+
+  struct VehicleInput
+  {
+    float throttle = 0.0f;   // 0..1
+    float brake = 0.0f;      // 0..1
+    float steer = 0.0f;      // -1..1
+    float handbrake = 0.0f;  // 0..1
+  };
+
   struct Name
   {
     static constexpr uint32_t kMax = 32;

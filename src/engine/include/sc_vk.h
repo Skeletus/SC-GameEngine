@@ -19,6 +19,7 @@ namespace sc
   struct CullingState;
   struct RenderPrepStreamingState;
   struct PhysicsDebugState;
+  struct VehicleDebugState;
 
   struct MeshVertex
   {
@@ -67,6 +68,7 @@ namespace sc
                                   CullingState* culling,
                                   RenderPrepStreamingState* renderPrep);
     void setPhysicsContext(PhysicsDebugState* physics);
+    void setVehicleContext(VehicleDebugState* vehicle);
     void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; m_debugUI.setDebugDraw(draw); }
     AssetManager& assets() { return m_assets; }
     const AssetManager& assets() const { return m_assets; }

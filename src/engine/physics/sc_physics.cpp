@@ -5,6 +5,7 @@
 #include "sc_world_partition.h"
 
 #include <btBulletDynamicsCommon.h>
+#include <BulletDynamics/Vehicle/btRaycastVehicle.h>
 
 #include <algorithm>
 #include <cmath>
@@ -93,6 +94,7 @@ namespace sc
       RigidBodyType type = RigidBodyType::Static;
       btRigidBody* body = nullptr;
       btCollisionShape* shape = nullptr;
+      btCollisionShape* childShape = nullptr;
       btMotionState* motion = nullptr;
       uint32_t layer = 0;
       uint32_t mask = 0;
@@ -110,6 +112,20 @@ namespace sc
 
     std::vector<BodyRecord> bodies;
     std::vector<uint32_t> freeList;
+
+    struct VehicleRecord
+    {
+      bool active = false;
+      PhysicsBodyHandle chassis{};
+      btRaycastVehicle* vehicle = nullptr;
+      btVehicleRaycaster* raycaster = nullptr;
+      uint32_t wheelCount = 0;
+      bool front[kMaxVehicleWheels]{};
+      float baseFrictionSlip = 1.2f;
+    };
+
+    std::vector<VehicleRecord> vehicles;
+    std::vector<uint32_t> vehicleFreeList;
 
     PhysicsStats stats{};
     uint32_t dynamicCount = 0;
@@ -147,6 +163,29 @@ namespace sc
     }
 
     return new btBoxShape(btVector3(0.5f, 0.5f, 0.5f));
+  }
+
+  static btCollisionShape* createShapeWithComOffset(const Collider& collider,
+                                                    const Transform& transform,
+                                                    const float comOffset[3],
+                                                    btCollisionShape*& outChildShape)
+  {
+    outChildShape = createShape(collider, transform);
+    if (!outChildShape)
+      return nullptr;
+
+    const float ox = comOffset ? comOffset[0] : 0.0f;
+    const float oy = comOffset ? comOffset[1] : 0.0f;
+    const float oz = comOffset ? comOffset[2] : 0.0f;
+    if (std::fabs(ox) < 1e-6f && std::fabs(oy) < 1e-6f && std::fabs(oz) < 1e-6f)
+      return outChildShape;
+
+    btCompoundShape* compound = new btCompoundShape();
+    btTransform local;
+    local.setIdentity();
+    local.setOrigin(btVector3(-ox, -oy, -oz));
+    compound->addChildShape(local, outChildShape);
+    return compound;
   }
 
   static btTransform makeTransform(const Transform& transform)
@@ -194,6 +233,20 @@ namespace sc
     if (!m_impl || !m_impl->world)
       return;
 
+    for (uint32_t i = 0; i < m_impl->vehicles.size(); ++i)
+    {
+      auto& vr = m_impl->vehicles[i];
+      if (!vr.active)
+        continue;
+      if (vr.vehicle && m_impl->world)
+        m_impl->world->removeVehicle(vr.vehicle);
+      delete vr.vehicle;
+      delete vr.raycaster;
+      vr = {};
+    }
+    m_impl->vehicles.clear();
+    m_impl->vehicleFreeList.clear();
+
     for (uint32_t i = 0; i < m_impl->bodies.size(); ++i)
     {
       BodyRecord& rec = m_impl->bodies[i];
@@ -202,7 +255,9 @@ namespace sc
       m_impl->world->removeRigidBody(rec.body);
       delete rec.motion;
       delete rec.body;
-      delete rec.shape;
+      if (rec.shape != rec.childShape)
+        delete rec.shape;
+      delete rec.childShape;
       rec = BodyRecord{};
     }
 
@@ -309,6 +364,7 @@ namespace sc
     rec.type = rb.type;
     rec.body = body;
     rec.shape = shape;
+    rec.childShape = shape;
     rec.motion = motion;
     rec.layer = collider.layer;
     rec.mask = collider.mask;
@@ -345,6 +401,85 @@ namespace sc
     return addRigidBody(entity, transform, rb, collider);
   }
 
+  PhysicsBodyHandle PhysicsWorld::addRigidBodyWithComOffset(Entity entity,
+                                                            const Transform& transform,
+                                                            const RigidBody& rb,
+                                                            const Collider& collider,
+                                                            const float comOffset[3])
+  {
+    if (!m_impl || !m_impl->world)
+      return {};
+
+    btCollisionShape* childShape = nullptr;
+    btCollisionShape* shape = createShapeWithComOffset(collider, transform, comOffset, childShape);
+    if (!shape)
+      return {};
+
+    btTransform startTransform = makeTransform(transform);
+
+    btVector3 localInertia(0, 0, 0);
+    btScalar mass = (rb.type == RigidBodyType::Dynamic) ? btScalar(rb.mass) : btScalar(0.0f);
+    if (mass > 0.0f)
+      shape->calculateLocalInertia(mass, localInertia);
+
+    btDefaultMotionState* motion = new btDefaultMotionState(startTransform);
+    btRigidBody::btRigidBodyConstructionInfo info(mass, motion, shape, localInertia);
+    info.m_friction = rb.friction;
+    info.m_restitution = rb.restitution;
+    btRigidBody* body = new btRigidBody(info);
+    body->setDamping(rb.linearDamping, rb.angularDamping);
+
+    if (rb.type == RigidBodyType::Kinematic)
+    {
+      body->setCollisionFlags(body->getCollisionFlags() | btCollisionObject::CF_KINEMATIC_OBJECT);
+      body->setActivationState(DISABLE_DEACTIVATION);
+    }
+
+    if (collider.isTrigger)
+      body->setCollisionFlags(body->getCollisionFlags() | btCollisionObject::CF_NO_CONTACT_RESPONSE);
+
+    uint32_t index = 0;
+    if (!m_impl->freeList.empty())
+    {
+      index = m_impl->freeList.back();
+      m_impl->freeList.pop_back();
+    }
+    else
+    {
+      index = static_cast<uint32_t>(m_impl->bodies.size());
+      m_impl->bodies.emplace_back();
+    }
+
+    BodyRecord& rec = m_impl->bodies[index];
+    rec.active = true;
+    rec.entity = entity;
+    rec.type = rb.type;
+    rec.body = body;
+    rec.shape = shape;
+    rec.childShape = childShape;
+    rec.motion = motion;
+    rec.layer = collider.layer;
+    rec.mask = collider.mask;
+
+    if (rb.type == RigidBodyType::Static && rec.layer == 1u && rec.mask == 0xFFFFFFFFu)
+    {
+      rec.layer = 2u;
+      rec.mask = 1u;
+    }
+
+    const PhysicsBodyHandle handle{ index + 1u };
+    body->setUserPointer(reinterpret_cast<void*>(static_cast<uintptr_t>(entity.value + 1u)));
+    body->setUserIndex(static_cast<int>(handle.id));
+
+    m_impl->world->addRigidBody(body, (int)rec.layer, (int)rec.mask);
+
+    if (rb.type == RigidBodyType::Dynamic) m_impl->dynamicCount++;
+    else if (rb.type == RigidBodyType::Kinematic) m_impl->kinematicCount++;
+    else m_impl->staticCount++;
+
+    return handle;
+  }
+
   void PhysicsWorld::removeRigidBody(PhysicsBodyHandle handle)
   {
     if (!m_impl || !m_impl->world)
@@ -352,6 +487,17 @@ namespace sc
 
     if (!handle.valid())
       return;
+
+    for (uint32_t i = 0; i < m_impl->vehicles.size(); ++i)
+    {
+      auto& vr = m_impl->vehicles[i];
+      if (vr.active && vr.chassis.id == handle.id)
+      {
+        VehicleHandle vh{ i + 1u };
+        removeRaycastVehicle(vh);
+      }
+    }
+
     const uint32_t idx = handle.id - 1u;
     if (idx >= m_impl->bodies.size())
       return;
@@ -363,7 +509,9 @@ namespace sc
     m_impl->world->removeRigidBody(rec.body);
     delete rec.motion;
     delete rec.body;
-    delete rec.shape;
+    if (rec.shape != rec.childShape)
+      delete rec.shape;
+    delete rec.childShape;
 
     if (rec.type == RigidBodyType::Dynamic && m_impl->dynamicCount > 0) m_impl->dynamicCount--;
     else if (rec.type == RigidBodyType::Kinematic && m_impl->kinematicCount > 0) m_impl->kinematicCount--;
@@ -500,6 +648,251 @@ namespace sc
     }
 
     return out;
+  }
+
+  VehicleHandle PhysicsWorld::createRaycastVehicle(PhysicsBodyHandle chassis,
+                                                   const VehicleComponent& vehicle,
+                                                   const VehicleWheelConfig* wheels,
+                                                   uint32_t wheelCount)
+  {
+    if (!m_impl || !m_impl->world)
+      return {};
+    if (!chassis.valid())
+      return {};
+    if (!wheels || wheelCount == 0)
+      return {};
+
+    const uint32_t bodyIndex = chassis.id - 1u;
+    if (bodyIndex >= m_impl->bodies.size())
+      return {};
+    BodyRecord& bodyRec = m_impl->bodies[bodyIndex];
+    if (!bodyRec.active || !bodyRec.body)
+      return {};
+    if (bodyRec.type != RigidBodyType::Dynamic)
+      return {};
+
+    uint32_t index = 0;
+    if (!m_impl->vehicleFreeList.empty())
+    {
+      index = m_impl->vehicleFreeList.back();
+      m_impl->vehicleFreeList.pop_back();
+    }
+    else
+    {
+      index = static_cast<uint32_t>(m_impl->vehicles.size());
+      m_impl->vehicles.emplace_back();
+    }
+
+    const uint32_t clampedCount = std::min<uint32_t>(wheelCount, kMaxVehicleWheels);
+
+    btRaycastVehicle::btVehicleTuning tuning;
+    tuning.m_suspensionStiffness = vehicle.suspensionStiffness;
+    tuning.m_suspensionCompression = vehicle.dampingCompression;
+    tuning.m_suspensionDamping = vehicle.dampingRelaxation;
+    tuning.m_frictionSlip = 1.2f;
+    tuning.m_maxSuspensionTravelCm = vehicle.suspensionRestLength * 100.0f;
+
+    btVehicleRaycaster* raycaster = new btDefaultVehicleRaycaster(m_impl->world);
+    btRaycastVehicle* raycastVehicle = new btRaycastVehicle(tuning, bodyRec.body, raycaster);
+    raycastVehicle->setCoordinateSystem(0, 1, 2);
+
+    m_impl->world->addVehicle(raycastVehicle);
+    bodyRec.body->setActivationState(DISABLE_DEACTIVATION);
+
+    for (uint32_t i = 0; i < clampedCount; ++i)
+    {
+      const VehicleWheelConfig& wc = wheels[i];
+      btVector3 conn(wc.connectionPoint[0], wc.connectionPoint[1], wc.connectionPoint[2]);
+      btVector3 dir(wc.direction[0], wc.direction[1], wc.direction[2]);
+      btVector3 axle(wc.axle[0], wc.axle[1], wc.axle[2]);
+
+      raycastVehicle->addWheel(conn,
+                               dir,
+                               axle,
+                               wc.suspensionRestLength,
+                               wc.wheelRadius,
+                               tuning,
+                               wc.front);
+
+      btWheelInfo& wi = raycastVehicle->getWheelInfo((int)i);
+      wi.m_suspensionStiffness = vehicle.suspensionStiffness;
+      wi.m_wheelsDampingCompression = vehicle.dampingCompression;
+      wi.m_wheelsDampingRelaxation = vehicle.dampingRelaxation;
+      wi.m_frictionSlip = tuning.m_frictionSlip;
+      wi.m_rollInfluence = 0.1f;
+      wi.m_maxSuspensionTravelCm = vehicle.suspensionRestLength * 100.0f;
+    }
+
+    raycastVehicle->resetSuspension();
+
+    Impl::VehicleRecord& rec = m_impl->vehicles[index];
+    rec.active = true;
+    rec.chassis = chassis;
+    rec.vehicle = raycastVehicle;
+    rec.raycaster = raycaster;
+    rec.wheelCount = clampedCount;
+    rec.baseFrictionSlip = tuning.m_frictionSlip;
+    for (uint32_t i = 0; i < clampedCount; ++i)
+      rec.front[i] = wheels[i].front;
+
+    return VehicleHandle{ index + 1u };
+  }
+
+  void PhysicsWorld::removeRaycastVehicle(VehicleHandle handle)
+  {
+    if (!m_impl || !m_impl->world)
+      return;
+    if (!handle.valid())
+      return;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->vehicles.size())
+      return;
+
+    Impl::VehicleRecord& rec = m_impl->vehicles[idx];
+    if (!rec.active)
+      return;
+
+    if (rec.vehicle)
+      m_impl->world->removeVehicle(rec.vehicle);
+    delete rec.vehicle;
+    delete rec.raycaster;
+    rec = {};
+    m_impl->vehicleFreeList.push_back(idx);
+  }
+
+  bool PhysicsWorld::setVehicleControls(VehicleHandle handle,
+                                        float engineForce,
+                                        float brakeForce,
+                                        float steerAngle,
+                                        float handbrakeForce)
+  {
+    if (!m_impl || !m_impl->world)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->vehicles.size())
+      return false;
+
+    Impl::VehicleRecord& rec = m_impl->vehicles[idx];
+    if (!rec.active || !rec.vehicle)
+      return false;
+
+    const float hbNorm = (handbrakeForce > 0.0f)
+                       ? std::min(1.0f, handbrakeForce / (handbrakeForce + brakeForce + 1.0f))
+                       : 0.0f;
+    const float rearSlip = rec.baseFrictionSlip * (1.0f - hbNorm * 0.7f);
+
+    for (uint32_t i = 0; i < rec.wheelCount; ++i)
+    {
+      const bool front = rec.front[i];
+      if (front)
+      {
+        rec.vehicle->setSteeringValue(steerAngle, (int)i);
+        rec.vehicle->applyEngineForce(0.0f, (int)i);
+        rec.vehicle->setBrake(brakeForce, (int)i);
+      }
+      else
+      {
+        rec.vehicle->setSteeringValue(0.0f, (int)i);
+        rec.vehicle->applyEngineForce(engineForce, (int)i);
+        rec.vehicle->setBrake(brakeForce + handbrakeForce, (int)i);
+
+        btWheelInfo& wi = rec.vehicle->getWheelInfo((int)i);
+        wi.m_frictionSlip = rearSlip;
+      }
+    }
+
+    return true;
+  }
+
+  bool PhysicsWorld::updateVehicleTuning(VehicleHandle handle, const VehicleComponent& vehicle)
+  {
+    if (!m_impl || !m_impl->world)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->vehicles.size())
+      return false;
+
+    Impl::VehicleRecord& rec = m_impl->vehicles[idx];
+    if (!rec.active || !rec.vehicle)
+      return false;
+
+    const float maxTravel = vehicle.suspensionRestLength * 100.0f;
+    for (uint32_t i = 0; i < rec.wheelCount; ++i)
+    {
+      btWheelInfo& wi = rec.vehicle->getWheelInfo((int)i);
+      wi.m_suspensionStiffness = vehicle.suspensionStiffness;
+      wi.m_wheelsDampingCompression = vehicle.dampingCompression;
+      wi.m_wheelsDampingRelaxation = vehicle.dampingRelaxation;
+      wi.m_wheelsRadius = vehicle.wheelRadius;
+      wi.m_suspensionRestLength1 = vehicle.suspensionRestLength;
+      wi.m_maxSuspensionTravelCm = maxTravel;
+    }
+
+    const uint32_t bodyIdx = rec.chassis.id - 1u;
+    if (bodyIdx < m_impl->bodies.size())
+    {
+      BodyRecord& bodyRec = m_impl->bodies[bodyIdx];
+      if (bodyRec.active && bodyRec.body && bodyRec.shape)
+      {
+        btVector3 inertia(0, 0, 0);
+        const btScalar mass = btScalar(std::max(0.0f, vehicle.mass));
+        if (mass > 0.0f)
+          bodyRec.shape->calculateLocalInertia(mass, inertia);
+        bodyRec.body->setMassProps(mass, inertia);
+        bodyRec.body->updateInertiaTensor();
+      }
+    }
+
+    return true;
+  }
+
+  bool PhysicsWorld::getVehicleTelemetry(VehicleHandle handle, VehicleRuntime& ioRuntime, float restLength)
+  {
+    if (!m_impl || !m_impl->world)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->vehicles.size())
+      return false;
+
+    Impl::VehicleRecord& rec = m_impl->vehicles[idx];
+    if (!rec.active || !rec.vehicle)
+      return false;
+
+    ioRuntime.wheelCount = rec.wheelCount;
+    const float speedKmh = rec.vehicle->getCurrentSpeedKmHour();
+    ioRuntime.speedMs = speedKmh / 3.6f;
+
+    const float invRest = (restLength > 1e-4f) ? (1.0f / restLength) : 0.0f;
+    for (uint32_t i = 0; i < rec.wheelCount; ++i)
+    {
+      const btWheelInfo& wi = rec.vehicle->getWheelInfo((int)i);
+      ioRuntime.wheelContact[i] = wi.m_raycastInfo.m_isInContact;
+      const float suspLen = wi.m_raycastInfo.m_suspensionLength;
+      const float comp = (restLength - suspLen) * invRest;
+      ioRuntime.suspensionCompression[i] = std::max(0.0f, std::min(1.0f, comp));
+
+      const btTransform& wt = wi.m_worldTransform;
+      const btVector3 p = wt.getOrigin();
+      ioRuntime.wheelWorldPos[i][0] = p.x();
+      ioRuntime.wheelWorldPos[i][1] = p.y();
+      ioRuntime.wheelWorldPos[i][2] = p.z();
+
+      const btQuaternion q = wt.getRotation();
+      eulerFromQuat(q, ioRuntime.wheelWorldRot[i]);
+
+      const btVector3 cp = wi.m_raycastInfo.m_contactPointWS;
+      ioRuntime.wheelContactPoint[i][0] = cp.x();
+      ioRuntime.wheelContactPoint[i][1] = cp.y();
+      ioRuntime.wheelContactPoint[i][2] = cp.z();
+    }
+
+    return true;
   }
 
   const PhysicsStats& PhysicsWorld::stats() const

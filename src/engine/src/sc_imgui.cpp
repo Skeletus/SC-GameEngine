@@ -2,6 +2,7 @@
 #include "sc_log.h"
 #include "sc_world_partition.h"
 #include "sc_physics.h"
+#include "sc_vehicle.h"
 
 #include <SDL.h>
 
@@ -477,6 +478,75 @@ namespace sc
       else
       {
         ImGui::Text("Last Ray Hit: none");
+      }
+    }
+
+    if (m_vehicleDebug)
+    {
+      ImGui::Separator();
+      ImGui::Text("Vehicle");
+
+      ImGui::Checkbox("Vehicle Camera Enabled", &m_vehicleDebug->cameraEnabled);
+
+      if (ImGui::Button("Respawn Vehicle"))
+        m_vehicleDebug->requestRespawn = true;
+
+      ImGui::Checkbox("Show Wheel Raycasts", &m_vehicleDebug->showWheelRaycasts);
+      ImGui::Checkbox("Show Contact Points", &m_vehicleDebug->showContactPoints);
+
+      const Entity veh = m_vehicleDebug->activeVehicle;
+      VehicleComponent* vc = (m_world && isValidEntity(veh)) ? m_world->get<VehicleComponent>(veh) : nullptr;
+      VehicleRuntime* vr = (m_world && isValidEntity(veh)) ? m_world->get<VehicleRuntime>(veh) : nullptr;
+
+      if (!vc || !vr)
+      {
+        ImGui::Text("Active vehicle: none");
+      }
+      else
+      {
+        const float kmh = vr->speedMs * 3.6f;
+        ImGui::Text("Speed: %.1f m/s (%.1f km/h)", vr->speedMs, kmh);
+        ImGui::Text("Engine Force: %.1f  Brake: %.1f", vr->engineForce, vr->brakeForce);
+        ImGui::Text("Steer Angle: %.1f deg", vr->steerAngle * 57.29578f);
+
+        for (uint32_t i = 0; i < vr->wheelCount; ++i)
+        {
+          ImGui::Text("Wheel %u: contact=%s  compression=%.2f",
+                      i,
+                      vr->wheelContact[i] ? "YES" : "NO",
+                      vr->suspensionCompression[i]);
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Handling");
+        ImGui::DragFloat("Mass", &vc->mass, 10.0f, 200.0f, 5000.0f, "%.0f");
+        ImGui::DragFloat("Engine Force", &vc->engineForce, 100.0f, 1000.0f, 20000.0f, "%.0f");
+        ImGui::DragFloat("Max Speed (m/s)", &vc->maxSpeed, 0.5f, 5.0f, 100.0f, "%.1f");
+        ImGui::DragFloat("Brake Force", &vc->brakeForce, 100.0f, 1000.0f, 30000.0f, "%.0f");
+        ImGui::DragFloat("Handbrake Force", &vc->handbrakeForce, 100.0f, 1000.0f, 30000.0f, "%.0f");
+
+        float steerDeg = vc->maxSteerAngle * 57.29578f;
+        if (ImGui::SliderFloat("Max Steer (deg)", &steerDeg, 5.0f, 45.0f, "%.1f"))
+          vc->maxSteerAngle = steerDeg / 57.29578f;
+        ImGui::DragFloat("Steer Response", &vc->steerResponse, 0.1f, 1.0f, 20.0f, "%.2f");
+
+        ImGui::Separator();
+        ImGui::Text("Suspension");
+        ImGui::DragFloat("Rest Length", &vc->suspensionRestLength, 0.01f, 0.05f, 1.0f, "%.2f");
+        ImGui::DragFloat("Stiffness", &vc->suspensionStiffness, 0.5f, 1.0f, 60.0f, "%.1f");
+        ImGui::DragFloat("Damping Compression", &vc->dampingCompression, 0.1f, 0.1f, 10.0f, "%.2f");
+        ImGui::DragFloat("Damping Relaxation", &vc->dampingRelaxation, 0.1f, 0.1f, 10.0f, "%.2f");
+        ImGui::DragFloat("Wheel Radius", &vc->wheelRadius, 0.01f, 0.1f, 1.0f, "%.2f");
+        ImGui::DragFloat("Wheel Width", &vc->wheelWidth, 0.01f, 0.05f, 1.0f, "%.2f");
+
+        float com[3] = { vc->centerOfMassOffset[0], vc->centerOfMassOffset[1], vc->centerOfMassOffset[2] };
+        if (ImGui::DragFloat3("COM Offset", com, 0.01f))
+        {
+          vc->centerOfMassOffset[0] = com[0];
+          vc->centerOfMassOffset[1] = com[1];
+          vc->centerOfMassOffset[2] = com[2];
+          m_vehicleDebug->requestRespawn = true;
+        }
       }
     }
 

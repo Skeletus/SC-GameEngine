@@ -8,6 +8,7 @@
 #include "sc_debug_draw.h"
 #include "sc_world_partition.h"
 #include "sc_physics.h"
+#include "sc_vehicle.h"
 
 #include <SDL.h>
 #include <thread>
@@ -125,6 +126,44 @@ int main()
   physicsSync.debug = &physicsDebug;
   physicsSync.tracked.reserve(4096);
 
+  sc::VehicleDebugState vehicleDebug{};
+  vehicleDebug.cameraEnabled = true;
+
+  sc::VehicleSystemState vehicleSystem{};
+  vehicleSystem.world = &physicsWorld;
+  vehicleSystem.sync = &physicsSync;
+  vehicleSystem.debug = &vehicleDebug;
+  vehicleSystem.tracked.reserve(32);
+
+  sc::VehicleInputState vehicleInput{};
+  vehicleInput.debug = &vehicleDebug;
+
+  sc::VehicleCameraState vehicleCamera{};
+  vehicleCamera.world = &physicsWorld;
+  vehicleCamera.debug = &vehicleDebug;
+  vehicleCamera.useFixedFollow = true;
+  vehicleCamera.fixedOffset[0] = 0.0f;
+  vehicleCamera.fixedOffset[1] = 3.0f;
+  vehicleCamera.fixedOffset[2] = -8.0f;
+  vehicleCamera.fixedRot[0] = -0.42f;
+  vehicleCamera.fixedRot[1] = 3.0f;
+  vehicleCamera.fixedRot[2] = 0.0f;
+  vehicleCamera.dynamicFov = true;
+  vehicleCamera.minFov = 60.0f;
+  vehicleCamera.maxFov = 75.0f;
+
+  sc::VehicleDemoState vehicleDemo{};
+  vehicleDemo.debug = &vehicleDebug;
+
+  sc::VehicleStreamingPinState vehiclePins{};
+  vehiclePins.streaming = &worldStreaming;
+  vehiclePins.debug = &vehicleDebug;
+  vehiclePins.pinRadius = 1u;
+
+  sc::VehicleDebugDrawState vehicleDraw{};
+  vehicleDraw.draw = &debugDraw;
+  vehicleDraw.debug = &vehicleDebug;
+
   sc::PhysicsDebugDrawState physicsDraw{};
   physicsDraw.world = &physicsWorld;
   physicsDraw.debug = &physicsDebug;
@@ -146,16 +185,31 @@ int main()
   const sc::MaterialHandle checkerMat = vk.assets().createMaterial(checkerDesc);
   physicsDemo.materialId = (checkerMat != sc::kInvalidMaterialHandle) ? checkerMat : 0u;
 
+  vehicleDemo.materialId = physicsDemo.materialId;
+  vehicleDemo.spawnPos[0] = sectorSize * 0.5f;
+  vehicleDemo.spawnPos[1] = 2.0f;
+  vehicleDemo.spawnPos[2] = sectorSize * 0.5f;
+  vehicleDemo.spawnRot[0] = 0.0f;
+  vehicleDemo.spawnRot[1] = 0.0f;
+  vehicleDemo.spawnRot[2] = 0.0f;
+
+  scheduler.addSystem("VehicleInput", sc::SystemPhase::Input, sc::VehicleInputSystem, &vehicleInput);
   scheduler.addSystem("Spawner", sc::SystemPhase::Simulation, sc::SpawnerSystem, &spawner);
-  scheduler.addSystem("WorldStreaming", sc::SystemPhase::Simulation, sc::WorldStreamingSystem, &worldStreaming, { "Spawner" });
+  scheduler.addSystem("VehicleDemo", sc::SystemPhase::Simulation, sc::VehicleDemoSystem, &vehicleDemo, { "Spawner" });
+  scheduler.addSystem("VehicleStreamingPin", sc::SystemPhase::Simulation, sc::VehicleStreamingPinSystem, &vehiclePins, { "VehicleDemo" });
+  scheduler.addSystem("WorldStreaming", sc::SystemPhase::Simulation, sc::WorldStreamingSystem, &worldStreaming, { "Spawner", "VehicleStreamingPin" });
   scheduler.addSystem("PhysicsDemo", sc::SystemPhase::Simulation, sc::PhysicsDemoSystem, &physicsDemo, { "WorldStreaming" });
-  scheduler.addSystem("PhysicsSync", sc::SystemPhase::FixedUpdate, sc::PhysicsSyncSystem, &physicsSync, { "PhysicsDemo" });
-  scheduler.addSystem("Transform", sc::SystemPhase::RenderPrep, sc::TransformSystem, nullptr, { "PhysicsDemo" });
+  scheduler.addSystem("VehiclePreStep", sc::SystemPhase::FixedUpdate, sc::VehicleSystemPreStep, &vehicleSystem, { "PhysicsDemo" });
+  scheduler.addSystem("PhysicsSync", sc::SystemPhase::FixedUpdate, sc::PhysicsSyncSystem, &physicsSync, { "PhysicsDemo", "VehiclePreStep" });
+  scheduler.addSystem("VehiclePostStep", sc::SystemPhase::FixedUpdate, sc::VehicleSystemPostStep, &vehicleSystem, { "PhysicsSync" });
+  scheduler.addSystem("VehicleCamera", sc::SystemPhase::RenderPrep, sc::VehicleCameraSystem, &vehicleCamera);
+  scheduler.addSystem("Transform", sc::SystemPhase::RenderPrep, sc::TransformSystem, nullptr, { "PhysicsDemo", "VehicleCamera" });
   scheduler.addSystem("Camera", sc::SystemPhase::RenderPrep, sc::CameraSystem, &cameraState, { "Transform" });
   scheduler.addSystem("Culling", sc::SystemPhase::RenderPrep, sc::CullingSystem, &culling, { "Camera" });
   scheduler.addSystem("RenderPrep", sc::SystemPhase::RenderPrep, sc::RenderPrepStreamingSystem, &renderPrep, { "Culling" });
   scheduler.addSystem("DebugDraw", sc::SystemPhase::RenderPrep, sc::DebugDrawSystem, &debugDrawState, { "RenderPrep" });
-  scheduler.addSystem("PhysicsDebugDraw", sc::SystemPhase::RenderPrep, sc::PhysicsDebugDrawSystem, &physicsDraw, { "DebugDraw" });
+  scheduler.addSystem("VehicleDebugDraw", sc::SystemPhase::RenderPrep, sc::VehicleDebugDrawSystem, &vehicleDraw, { "DebugDraw" });
+  scheduler.addSystem("PhysicsDebugDraw", sc::SystemPhase::RenderPrep, sc::PhysicsDebugDrawSystem, &physicsDraw, { "VehicleDebugDraw" });
   scheduler.addSystem("Debug", sc::SystemPhase::Render, sc::DebugSystem, nullptr, { "DebugDraw" });
   scheduler.finalize();
 
@@ -212,6 +266,7 @@ int main()
     vk.setWorldStreamingContext(&worldStreaming, &culling, &renderPrep);
     vk.setDebugDraw(&debugDraw);
     vk.setPhysicsContext(&physicsDebug);
+    vk.setVehicleContext(&vehicleDebug);
 
     if (vk.beginFrame())
       vk.endFrame();

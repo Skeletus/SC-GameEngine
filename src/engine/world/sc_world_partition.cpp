@@ -101,9 +101,9 @@ namespace sc
         ground.position[0] = centerX;
         ground.position[1] = -0.55f;
         ground.position[2] = centerZ;
-        ground.scale[0] = size * 0.5f;
+        ground.scale[0] = size;
         ground.scale[1] = 0.10f;
-        ground.scale[2] = size * 0.5f;
+        ground.scale[2] = size;
         ground.meshId = 1u;
         ground.materialId = 2u; // default unlit material
         ground.localBounds = kUnitCubeBounds;
@@ -197,6 +197,36 @@ namespace sc
       m_config.propsPerSectorMax = m_config.propsPerSectorMin;
     if (m_sectors.empty())
       m_sectors.reserve(256);
+  }
+
+  void WorldPartition::setPinnedCenters(const std::vector<SectorCoord>& centers, uint32_t radius)
+  {
+    m_pinnedCenters = centers;
+    m_pinnedRadius = radius;
+    m_pinnedExpanded.clear();
+
+    const int32_t r = static_cast<int32_t>(radius);
+    for (const SectorCoord& c : m_pinnedCenters)
+    {
+      for (int32_t dz = -r; dz <= r; ++dz)
+      {
+        for (int32_t dx = -r; dx <= r; ++dx)
+        {
+          const SectorCoord coord{ c.x + dx, c.z + dz };
+          bool exists = false;
+          for (const SectorCoord& e : m_pinnedExpanded)
+          {
+            if (e == coord)
+            {
+              exists = true;
+              break;
+            }
+          }
+          if (!exists)
+            m_pinnedExpanded.push_back(coord);
+        }
+      }
+    }
   }
 
   SectorCoord WorldPartition::worldToSector(const Vec3& pos) const
@@ -398,18 +428,34 @@ namespace sc
 
     const int32_t r = static_cast<int32_t>(loadRadiusSectors);
     const uint32_t side = static_cast<uint32_t>(r * 2 + 1);
-    m_frameStats.desiredSectors = side * side;
 
     m_scratchDesired.clear();
-    m_scratchDesired.reserve(static_cast<size_t>(side) * static_cast<size_t>(side));
+    m_scratchDesiredLookup.clear();
+    m_scratchDesired.reserve(static_cast<size_t>(side) * static_cast<size_t>(side) + m_pinnedExpanded.size());
+
+    auto pushDesired = [&](const SectorCoord& coord)
+    {
+      for (const SectorCoord& e : m_scratchDesiredLookup)
+      {
+        if (e == coord)
+          return;
+      }
+      m_scratchDesiredLookup.push_back(coord);
+      m_scratchDesired.push_back(coord);
+    };
 
     for (int32_t dz = -r; dz <= r; ++dz)
     {
       for (int32_t dx = -r; dx <= r; ++dx)
       {
-        m_scratchDesired.push_back({ cameraSector.x + dx, cameraSector.z + dz });
+        pushDesired({ cameraSector.x + dx, cameraSector.z + dz });
       }
     }
+
+    for (const SectorCoord& coord : m_pinnedExpanded)
+      pushDesired(coord);
+
+    m_frameStats.desiredSectors = static_cast<uint32_t>(m_scratchDesired.size());
 
     std::sort(m_scratchDesired.begin(), m_scratchDesired.end(),
       [&](const SectorCoord& a, const SectorCoord& b)
@@ -450,7 +496,8 @@ namespace sc
         if (sector.state == SectorLoadState::Unloading)
           continue;
 
-        if (budget.maxActiveSectors > 0 && reserved >= budget.maxActiveSectors)
+        const bool pinned = isSectorPinned(coord);
+        if (!pinned && budget.maxActiveSectors > 0 && reserved >= budget.maxActiveSectors)
         {
           m_frameStats.rejectedBySectorBudget++;
           continue;
@@ -468,6 +515,13 @@ namespace sc
     {
       for (auto& [coord, sector] : m_sectors)
       {
+        if (isSectorPinned(coord))
+        {
+          if (sector.state == SectorLoadState::Active)
+            sector.lastTouchedFrame = m_frameCounter;
+          continue;
+        }
+
         const int distSq = sectorDistanceSq(coord, cameraSector);
         if (distSq <= unloadRadiusSq)
         {
@@ -557,11 +611,23 @@ namespace sc
 
   bool WorldPartition::isSectorDesired(const SectorCoord& coord) const
   {
+    if (isSectorPinned(coord))
+      return true;
     const int distSq = sectorDistanceSq(coord, m_lastCameraSector);
     const int r = static_cast<int>(m_lastUnloadRadius);
     if (r <= 0)
       return distSq == 0;
     return distSq <= r * r;
+  }
+
+  bool WorldPartition::isSectorPinned(const SectorCoord& coord) const
+  {
+    for (const SectorCoord& c : m_pinnedExpanded)
+    {
+      if (c == coord)
+        return true;
+    }
+    return false;
   }
 
   void WorldPartition::queueUnloadEntities(Sector& sector)
@@ -996,6 +1062,8 @@ namespace sc
     cameraForward.x = std::sin(yaw) * std::cos(pitch);
     cameraForward.y = -std::sin(pitch);
     cameraForward.z = std::cos(yaw) * std::cos(pitch);
+
+    state->partition.setPinnedCenters(state->pinnedCenters, state->pinnedRadius);
 
     WorldPartitionBudget budget{};
     budget.maxActiveSectors = state->budgets.maxActiveSectors;

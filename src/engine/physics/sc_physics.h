@@ -51,6 +51,49 @@ namespace sc
     bool valid() const { return id != kInvalid; }
   };
 
+  struct VehicleHandle
+  {
+    uint32_t id = 0;
+    static constexpr uint32_t kInvalid = 0u;
+    bool valid() const { return id != kInvalid; }
+  };
+
+  static constexpr uint32_t kMaxVehicleWheels = 4u;
+
+  struct VehicleWheelConfig
+  {
+    float connectionPoint[3] = { 0.0f, 0.0f, 0.0f };
+    float direction[3] = { 0.0f, -1.0f, 0.0f };
+    float axle[3] = { -1.0f, 0.0f, 0.0f };
+    float suspensionRestLength = 0.35f;
+    float wheelRadius = 0.35f;
+    float wheelWidth = 0.25f;
+    bool front = false;
+  };
+
+  struct VehicleRuntime
+  {
+    VehicleHandle handle{};
+    PhysicsBodyHandle body{};
+    uint32_t wheelCount = 0;
+
+    float throttle = 0.0f;
+    float brake = 0.0f;
+    float steer = 0.0f;
+    float handbrake = 0.0f;
+
+    float speedMs = 0.0f;
+    float engineForce = 0.0f;
+    float brakeForce = 0.0f;
+    float steerAngle = 0.0f;
+
+    bool wheelContact[kMaxVehicleWheels]{};
+    float suspensionCompression[kMaxVehicleWheels]{};
+    float wheelWorldPos[kMaxVehicleWheels][3]{};
+    float wheelWorldRot[kMaxVehicleWheels][3]{};
+    float wheelContactPoint[kMaxVehicleWheels][3]{};
+  };
+
   struct PhysicsStats
   {
     uint32_t dynamicBodies = 0;
@@ -108,6 +151,11 @@ namespace sc
                                    const Transform& transform,
                                    const RigidBody& rb,
                                    const Collider& collider);
+    PhysicsBodyHandle addRigidBodyWithComOffset(Entity entity,
+                                                const Transform& transform,
+                                                const RigidBody& rb,
+                                                const Collider& collider,
+                                                const float comOffset[3]);
     PhysicsBodyHandle addStaticCollider(Entity entity,
                                         const Transform& transform,
                                         const Collider& collider);
@@ -119,6 +167,15 @@ namespace sc
 
     RaycastHit raycast(const float origin[3], const float dir[3], float maxDist, uint32_t mask) const;
     SweepHit sweepCapsule(const float start[3], const float end[3], float radius, float halfHeight, uint32_t mask) const;
+
+    VehicleHandle createRaycastVehicle(PhysicsBodyHandle chassis,
+                                       const VehicleComponent& vehicle,
+                                       const VehicleWheelConfig* wheels,
+                                       uint32_t wheelCount);
+    void removeRaycastVehicle(VehicleHandle handle);
+    bool setVehicleControls(VehicleHandle handle, float engineForce, float brakeForce, float steerAngle, float handbrakeForce);
+    bool updateVehicleTuning(VehicleHandle handle, const VehicleComponent& vehicle);
+    bool getVehicleTelemetry(VehicleHandle handle, VehicleRuntime& ioRuntime, float restLength);
 
     const PhysicsStats& stats() const;
 

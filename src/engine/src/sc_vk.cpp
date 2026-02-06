@@ -1430,6 +1430,11 @@ namespace sc
     m_debugUI.setPhysicsContext(physics);
   }
 
+  void VkRenderer::setVehicleContext(VehicleDebugState* vehicle)
+  {
+    m_debugUI.setVehicleContext(vehicle);
+  }
+
   void VkRenderer::buildAssetUiSnapshot()
   {
     AssetStatsSnapshot stats = m_assets.stats();

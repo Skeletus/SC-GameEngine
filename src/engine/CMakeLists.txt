@@ -8,6 +8,7 @@ target_sources(sc_engine
     src/sc_imgui.cpp
     src/sc_vk.cpp
     physics/sc_physics.cpp
+    physics/sc_vehicle.cpp
     world/sc_world_partition.cpp
 )
 
