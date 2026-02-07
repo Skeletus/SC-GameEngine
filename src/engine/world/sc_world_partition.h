@@ -87,6 +87,8 @@ namespace sc
     uint32_t pendingDespawns = 0;
     std::vector<SpawnRecord> spawns;
     std::vector<Entity> entities;
+    std::vector<Entity> trafficEntities;
+    bool trafficSpawned = false;
   };
 
   template<typename T>

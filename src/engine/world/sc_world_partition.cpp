@@ -4,6 +4,7 @@
 #include "sc_assets.h"
 #include "sc_paths.h"
 #include "sc_physics.h"
+#include "sc_traffic_common.h"
 
 #include <algorithm>
 #include <cmath>
@@ -349,6 +350,8 @@ namespace sc
     sector.lastTouchedFrame = m_frameCounter;
     sector.spawns.clear();
     sector.entities.clear();
+    sector.trafficEntities.clear();
+    sector.trafficSpawned = false;
     sector.pendingDespawns = 0;
 
     auto loadedIt = std::find(m_loadedThisFrame.begin(), m_loadedThisFrame.end(), sector.coord);
@@ -545,6 +548,8 @@ namespace sc
             sector.requestId++;
             sector.spawns.clear();
             sector.entities.clear();
+            sector.trafficEntities.clear();
+            sector.trafficSpawned = false;
             sector.pendingDespawns = 0;
             break;
           default:
@@ -632,7 +637,11 @@ namespace sc
 
   void WorldPartition::queueUnloadEntities(Sector& sector)
   {
-    if (sector.entities.empty())
+    const uint32_t staticCount = static_cast<uint32_t>(sector.entities.size());
+    const uint32_t trafficCount = static_cast<uint32_t>(sector.trafficEntities.size());
+    const uint32_t total = staticCount + trafficCount;
+
+    if (total == 0)
     {
       sector.pendingDespawns = 0;
       return;
@@ -640,9 +649,13 @@ namespace sc
 
     for (const Entity e : sector.entities)
       m_pendingDespawns.push_back({ e, sector.coord });
+    for (const Entity e : sector.trafficEntities)
+      m_pendingDespawns.push_back({ e, sector.coord });
 
-    sector.pendingDespawns = static_cast<uint32_t>(sector.entities.size());
+    sector.pendingDespawns = total;
     sector.entities.clear();
+    sector.trafficEntities.clear();
+    sector.trafficSpawned = false;
   }
 
   bool WorldPartition::readSectorFile(const SectorCoord& coord, std::vector<SpawnRecord>& outSpawns) const
@@ -867,15 +880,16 @@ namespace sc
       const PendingDespawn pd = m_pendingDespawns.front();
       m_pendingDespawns.pop_front();
 
+      const bool wasTraffic = world.has<TrafficAgent>(pd.entity);
       if (world.destroy(pd.entity))
       {
         despawned++;
-        if (m_activeEntityEstimate > 0)
+        if (!wasTraffic && m_activeEntityEstimate > 0)
           m_activeEntityEstimate--;
       }
       else
       {
-        if (m_activeEntityEstimate > 0)
+        if (!wasTraffic && m_activeEntityEstimate > 0)
           m_activeEntityEstimate--;
       }
 

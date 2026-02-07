@@ -164,6 +164,16 @@ namespace sc
 
     bool setKinematicTarget(PhysicsBodyHandle handle, const Transform& transform);
     bool getBodyTransform(PhysicsBodyHandle handle, float outPos[3], float outRot[3]) const;
+    bool isBodyActive(PhysicsBodyHandle handle) const;
+    void activateBody(PhysicsBodyHandle handle);
+    bool isBodyInWorld(PhysicsBodyHandle handle) const;
+    bool getBodyType(PhysicsBodyHandle handle, RigidBodyType& outType) const;
+    bool getBodyMass(PhysicsBodyHandle handle, float& outMass) const;
+    bool getBodyLinearVelocity(PhysicsBodyHandle handle, float outVel[3]) const;
+    bool getBodyCollisionFlags(PhysicsBodyHandle handle, uint32_t& outFlags) const;
+    bool isVehicleInWorld(VehicleHandle handle) const;
+    bool getVehicleSpeedKmh(VehicleHandle handle, float& outSpeed) const;
+    uint32_t getVehicleWheelCount(VehicleHandle handle) const;
 
     RaycastHit raycast(const float origin[3], const float dir[3], float maxDist, uint32_t mask) const;
     SweepHit sweepCapsule(const float start[3], const float end[3], float radius, float halfHeight, uint32_t mask) const;
@@ -188,6 +198,7 @@ namespace sc
   {
     Entity entity = kInvalidEntity;
     PhysicsBodyHandle handle{};
+    RigidBodyType type = RigidBodyType::Static;
   };
 
   struct PhysicsSyncState

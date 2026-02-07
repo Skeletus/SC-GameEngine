@@ -3,6 +3,7 @@
 #include "sc_world_partition.h"
 #include "sc_physics.h"
 #include "sc_vehicle.h"
+#include "sc_traffic_common.h"
 
 #include <SDL.h>
 
@@ -548,6 +549,134 @@ namespace sc
           m_vehicleDebug->requestRespawn = true;
         }
       }
+    }
+
+    if (m_trafficDebug)
+    {
+      ImGui::Separator();
+      ImGui::Text("Traffic");
+
+      ImGui::Text("Total: %u  Tier A: %u  Tier B: %u  Tier C: %u",
+                  m_trafficDebug->totalVehicles,
+                  m_trafficDebug->tierPhysics,
+                  m_trafficDebug->tierKinematic,
+                  m_trafficDebug->tierOnRails);
+      auto hitTypeLabel = [](TrafficHitType t) -> const char*
+      {
+        switch (t)
+        {
+          case TrafficHitType::Self: return "Self";
+          case TrafficHitType::Vehicle: return "Vehicle";
+          case TrafficHitType::World: return "World";
+          default: break;
+        }
+        return "None";
+      };
+
+      if (isValidEntity(m_trafficDebug->nearestTrafficEntity))
+      {
+        ImGui::Text("Nearest: e=%u tier=%u dist=%.1f",
+                    m_trafficDebug->nearestTrafficEntity.index(),
+                    (uint32_t)m_trafficDebug->nearestTrafficTier,
+                    m_trafficDebug->nearestTrafficDistance);
+        ImGui::Text("Speed: %.2f  Target: %.2f  Lane: %u  s=%.2f",
+                    m_trafficDebug->nearestTrafficSpeed,
+                    m_trafficDebug->nearestTrafficTargetSpeed,
+                    m_trafficDebug->nearestTrafficLaneId,
+                    m_trafficDebug->nearestTrafficLaneS);
+        ImGui::Text("Input: thr=%.2f brk=%.2f str=%.2f",
+                    m_trafficDebug->nearestTrafficInput.throttle,
+                    m_trafficDebug->nearestTrafficInput.brake,
+                    m_trafficDebug->nearestTrafficInput.steer);
+        ImGui::Text("Body Active: %s  Sensor: %.2f (%s)",
+                    m_trafficDebug->nearestTrafficBodyActive ? "YES" : "NO",
+                    m_trafficDebug->nearestTrafficSensorHitDistance,
+                    hitTypeLabel(m_trafficDebug->nearestTrafficSensorHitType));
+        ImGui::Text("ECS Pos: %.2f %.2f %.2f",
+                    m_trafficDebug->nearestTrafficEcsPos[0],
+                    m_trafficDebug->nearestTrafficEcsPos[1],
+                    m_trafficDebug->nearestTrafficEcsPos[2]);
+        ImGui::Text("Phys Pos: %.2f %.2f %.2f  Delta: %.2f",
+                    m_trafficDebug->nearestTrafficPhysPos[0],
+                    m_trafficDebug->nearestTrafficPhysPos[1],
+                    m_trafficDebug->nearestTrafficPhysPos[2],
+                    m_trafficDebug->nearestTrafficDesync);
+      }
+      else
+      {
+        ImGui::Text("Nearest: none");
+      }
+
+      if (isValidEntity(m_trafficDebug->stuckTrafficEntity))
+      {
+        ImGui::Text("Stuck: e=%u tier=%u",
+                    m_trafficDebug->stuckTrafficEntity.index(),
+                    (uint32_t)m_trafficDebug->stuckTrafficTier);
+        ImGui::Text("Speed: %.2f  Target: %.2f  Lane: %u  s=%.2f",
+                    m_trafficDebug->stuckTrafficSpeed,
+                    m_trafficDebug->stuckTrafficTargetSpeed,
+                    m_trafficDebug->stuckTrafficLaneId,
+                    m_trafficDebug->stuckTrafficLaneS);
+        ImGui::Text("Body Active: %s  Sensor: %.2f (%s)",
+                    m_trafficDebug->stuckTrafficBodyActive ? "YES" : "NO",
+                    m_trafficDebug->stuckTrafficSensorHitDistance,
+                    hitTypeLabel(m_trafficDebug->stuckTrafficSensorHitType));
+      }
+      else
+      {
+        ImGui::Text("Stuck: none");
+      }
+      ImGui::Text("Spawns / Despawns: +%u / -%u",
+                  m_trafficDebug->spawnsThisFrame,
+                  m_trafficDebug->despawnsThisFrame);
+
+      if (m_trafficDebug->nearestLaneId != kInvalidLaneId)
+        ImGui::Text("Nearest Lane: %u", m_trafficDebug->nearestLaneId);
+      else
+        ImGui::Text("Nearest Lane: none");
+
+      ImGui::Separator();
+      ImGui::Text("Spawning");
+      ImGui::SliderFloat("Density (veh/km^2)", &m_trafficDebug->densityPerKm2, 0.0f, 1000.0f, "%.1f");
+      ImGui::SliderFloat("Player Exclusion (m)", &m_trafficDebug->playerExclusionRadius, 0.0f, 80.0f, "%.1f");
+
+      ImGui::Separator();
+      ImGui::Text("AI");
+      ImGui::SliderFloat("LookAhead Dist", &m_trafficDebug->lookAheadDist, 2.0f, 40.0f, "%.1f");
+      ImGui::SliderFloat("Safe Distance", &m_trafficDebug->safeDistance, 2.0f, 40.0f, "%.1f");
+      ImGui::SliderFloat("Front Ray Length", &m_trafficDebug->frontRayLength, 5.0f, 60.0f, "%.1f");
+      ImGui::SliderFloat("Speed Multiplier", &m_trafficDebug->speedMultiplier, 0.2f, 2.5f, "%.2f");
+
+      ImGui::Separator();
+      ImGui::Text("LOD");
+      ImGui::SliderFloat("Tier A Enter", &m_trafficDebug->tierAEnter, 10.0f, 200.0f, "%.1f");
+      ImGui::SliderFloat("Tier A Exit", &m_trafficDebug->tierAExit, 20.0f, 260.0f, "%.1f");
+      ImGui::SliderFloat("Tier B Enter", &m_trafficDebug->tierBEnter, 30.0f, 300.0f, "%.1f");
+      ImGui::SliderFloat("Tier B Exit", &m_trafficDebug->tierBExit, 40.0f, 400.0f, "%.1f");
+
+      if (m_trafficDebug->tierAExit < m_trafficDebug->tierAEnter + 1.0f)
+        m_trafficDebug->tierAExit = m_trafficDebug->tierAEnter + 1.0f;
+      if (m_trafficDebug->tierBEnter < m_trafficDebug->tierAExit + 1.0f)
+        m_trafficDebug->tierBEnter = m_trafficDebug->tierAExit + 1.0f;
+      if (m_trafficDebug->tierBExit < m_trafficDebug->tierBEnter + 1.0f)
+        m_trafficDebug->tierBExit = m_trafficDebug->tierBEnter + 1.0f;
+
+      int maxTotal = static_cast<int>(m_trafficDebug->maxTrafficVehiclesTotal);
+      int maxPhysics = static_cast<int>(m_trafficDebug->maxTrafficVehiclesPhysics);
+      int maxKinematic = static_cast<int>(m_trafficDebug->maxTrafficVehiclesKinematic);
+      if (ImGui::SliderInt("Max Total", &maxTotal, 0, 1000))
+        m_trafficDebug->maxTrafficVehiclesTotal = static_cast<uint32_t>(std::max(maxTotal, 0));
+      if (ImGui::SliderInt("Max Tier A", &maxPhysics, 0, 256))
+        m_trafficDebug->maxTrafficVehiclesPhysics = static_cast<uint32_t>(std::max(maxPhysics, 0));
+      if (ImGui::SliderInt("Max Tier B", &maxKinematic, 0, 512))
+        m_trafficDebug->maxTrafficVehiclesKinematic = static_cast<uint32_t>(std::max(maxKinematic, 0));
+
+      ImGui::Separator();
+      ImGui::Text("Debug");
+      ImGui::Checkbox("Show Lanes", &m_trafficDebug->showLanes);
+      ImGui::Checkbox("Show Targets", &m_trafficDebug->showAgentTargets);
+      ImGui::Checkbox("Show Sensors", &m_trafficDebug->showSensorRays);
+      ImGui::Checkbox("Show Tier Colors", &m_trafficDebug->showTierColors);
     }
 
     ImGui::Separator();

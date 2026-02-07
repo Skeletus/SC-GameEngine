@@ -578,6 +578,165 @@ namespace sc
     return true;
   }
 
+  bool PhysicsWorld::isBodyActive(PhysicsBodyHandle handle) const
+  {
+    if (!m_impl)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->bodies.size())
+      return false;
+    BodyRecord& rec = m_impl->bodies[idx];
+    if (!rec.active || !rec.body)
+      return false;
+    return rec.body->isActive();
+  }
+
+  void PhysicsWorld::activateBody(PhysicsBodyHandle handle)
+  {
+    if (!m_impl)
+      return;
+    if (!handle.valid())
+      return;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->bodies.size())
+      return;
+    BodyRecord& rec = m_impl->bodies[idx];
+    if (!rec.active || !rec.body)
+      return;
+    rec.body->activate(true);
+  }
+
+  bool PhysicsWorld::isBodyInWorld(PhysicsBodyHandle handle) const
+  {
+    if (!m_impl)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->bodies.size())
+      return false;
+    BodyRecord& rec = m_impl->bodies[idx];
+    if (!rec.active || !rec.body)
+      return false;
+    return rec.body->isInWorld();
+  }
+
+  bool PhysicsWorld::getBodyType(PhysicsBodyHandle handle, RigidBodyType& outType) const
+  {
+    if (!m_impl)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->bodies.size())
+      return false;
+    BodyRecord& rec = m_impl->bodies[idx];
+    if (!rec.active || !rec.body)
+      return false;
+    outType = rec.type;
+    return true;
+  }
+
+  bool PhysicsWorld::getBodyMass(PhysicsBodyHandle handle, float& outMass) const
+  {
+    if (!m_impl)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->bodies.size())
+      return false;
+    BodyRecord& rec = m_impl->bodies[idx];
+    if (!rec.active || !rec.body)
+      return false;
+    const btScalar inv = rec.body->getInvMass();
+    outMass = (inv > 0.0f) ? (1.0f / inv) : 0.0f;
+    return true;
+  }
+
+  bool PhysicsWorld::getBodyLinearVelocity(PhysicsBodyHandle handle, float outVel[3]) const
+  {
+    if (!m_impl)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->bodies.size())
+      return false;
+    BodyRecord& rec = m_impl->bodies[idx];
+    if (!rec.active || !rec.body)
+      return false;
+    const btVector3 v = rec.body->getLinearVelocity();
+    outVel[0] = v.x();
+    outVel[1] = v.y();
+    outVel[2] = v.z();
+    return true;
+  }
+
+  bool PhysicsWorld::getBodyCollisionFlags(PhysicsBodyHandle handle, uint32_t& outFlags) const
+  {
+    if (!m_impl)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->bodies.size())
+      return false;
+    BodyRecord& rec = m_impl->bodies[idx];
+    if (!rec.active || !rec.body)
+      return false;
+    outFlags = static_cast<uint32_t>(rec.body->getCollisionFlags());
+    return true;
+  }
+
+  bool PhysicsWorld::isVehicleInWorld(VehicleHandle handle) const
+  {
+    if (!m_impl || !m_impl->world)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->vehicles.size())
+      return false;
+    const Impl::VehicleRecord& rec = m_impl->vehicles[idx];
+    if (!rec.active || !rec.vehicle)
+      return false;
+    return rec.vehicle->getRigidBody()->isInWorld();
+  }
+
+  bool PhysicsWorld::getVehicleSpeedKmh(VehicleHandle handle, float& outSpeed) const
+  {
+    if (!m_impl)
+      return false;
+    if (!handle.valid())
+      return false;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->vehicles.size())
+      return false;
+    const Impl::VehicleRecord& rec = m_impl->vehicles[idx];
+    if (!rec.active || !rec.vehicle)
+      return false;
+    outSpeed = (float)rec.vehicle->getCurrentSpeedKmHour();
+    return true;
+  }
+
+  uint32_t PhysicsWorld::getVehicleWheelCount(VehicleHandle handle) const
+  {
+    if (!m_impl)
+      return 0u;
+    if (!handle.valid())
+      return 0u;
+    const uint32_t idx = handle.id - 1u;
+    if (idx >= m_impl->vehicles.size())
+      return 0u;
+    const Impl::VehicleRecord& rec = m_impl->vehicles[idx];
+    if (!rec.active)
+      return 0u;
+    return rec.wheelCount;
+  }
+
   RaycastHit PhysicsWorld::raycast(const float origin[3], const float dir[3], float maxDist, uint32_t mask) const
   {
     RaycastHit out{};
@@ -724,6 +883,9 @@ namespace sc
     }
 
     raycastVehicle->resetSuspension();
+
+    for (uint32_t i = 0; i < clampedCount; ++i)
+      raycastVehicle->updateWheelTransform((int)i, true);
 
     Impl::VehicleRecord& rec = m_impl->vehicles[index];
     rec.active = true;
@@ -941,6 +1103,40 @@ namespace sc
     PhysicsWorld& physics = *state->world;
     PhysicsDebugState* debug = state->debug;
 
+    for (size_t i = 0; i < state->tracked.size();)
+    {
+      const PhysicsTrackedBody tb = state->tracked[i];
+      const bool alive = world.isAlive(tb.entity);
+      const bool has = alive &&
+                       world.has<RigidBody>(tb.entity) &&
+                       world.has<Collider>(tb.entity) &&
+                       world.has<Transform>(tb.entity);
+
+      bool remove = false;
+      if (!alive || !has || !tb.handle.valid())
+      {
+        remove = true;
+      }
+      else
+      {
+        RigidBody* rb = world.get<RigidBody>(tb.entity);
+        PhysicsBodyHandle* hb = world.get<PhysicsBodyHandle>(tb.entity);
+        if (!rb || !hb || hb->id != tb.handle.id || rb->type != tb.type)
+          remove = true;
+      }
+
+      if (remove)
+      {
+        physics.removeRigidBody(tb.handle);
+        if (alive)
+          world.remove<PhysicsBodyHandle>(tb.entity);
+        state->tracked[i] = state->tracked.back();
+        state->tracked.pop_back();
+        continue;
+      }
+      ++i;
+    }
+
     world.ForEach<RigidBody, Collider, Transform>([&](Entity e, RigidBody& rb, Collider& col, Transform& tr)
     {
       if (world.has<PhysicsBodyHandle>(e))
@@ -954,7 +1150,7 @@ namespace sc
 
       PhysicsBodyHandle& hb = world.add<PhysicsBodyHandle>(e);
       hb = handle;
-      state->tracked.push_back({ e, handle });
+      state->tracked.push_back({ e, handle, rb.type });
     });
 
     world.ForEach<RigidBody, Transform, PhysicsBodyHandle>([&](Entity, RigidBody& rb, Transform& tr, PhysicsBodyHandle& h)
@@ -988,27 +1184,6 @@ namespace sc
         tr.dirty = true;
       }
     });
-
-    for (size_t i = 0; i < state->tracked.size();)
-    {
-      const PhysicsTrackedBody tb = state->tracked[i];
-      const bool alive = world.isAlive(tb.entity);
-      const bool has = alive &&
-                       world.has<RigidBody>(tb.entity) &&
-                       world.has<Collider>(tb.entity) &&
-                       world.has<Transform>(tb.entity);
-
-      if (!alive || !has || !tb.handle.valid())
-      {
-        physics.removeRigidBody(tb.handle);
-        if (alive)
-          world.remove<PhysicsBodyHandle>(tb.entity);
-        state->tracked[i] = state->tracked.back();
-        state->tracked.pop_back();
-        continue;
-      }
-      ++i;
-    }
 
     if (debug)
       debug->stats = physics.stats();

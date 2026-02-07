@@ -1435,6 +1435,11 @@ namespace sc
     m_debugUI.setVehicleContext(vehicle);
   }
 
+  void VkRenderer::setTrafficContext(TrafficDebugState* traffic)
+  {
+    m_debugUI.setTrafficContext(traffic);
+  }
+
   void VkRenderer::buildAssetUiSnapshot()
   {
     AssetStatsSnapshot stats = m_assets.stats();

@@ -141,6 +141,10 @@ namespace sc
     float handbrake = 0.0f;  // 0..1
   };
 
+  struct PlayerVehicle
+  {
+  };
+
   struct Name
   {
     static constexpr uint32_t kMax = 32;

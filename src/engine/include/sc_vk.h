@@ -20,6 +20,7 @@ namespace sc
   struct RenderPrepStreamingState;
   struct PhysicsDebugState;
   struct VehicleDebugState;
+  struct TrafficDebugState;
 
   struct MeshVertex
   {
@@ -69,6 +70,7 @@ namespace sc
                                   RenderPrepStreamingState* renderPrep);
     void setPhysicsContext(PhysicsDebugState* physics);
     void setVehicleContext(VehicleDebugState* vehicle);
+    void setTrafficContext(TrafficDebugState* traffic);
     void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; m_debugUI.setDebugDraw(draw); }
     AssetManager& assets() { return m_assets; }
     const AssetManager& assets() const { return m_assets; }

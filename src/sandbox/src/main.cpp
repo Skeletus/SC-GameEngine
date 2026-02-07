@@ -9,6 +9,10 @@
 #include "sc_world_partition.h"
 #include "sc_physics.h"
 #include "sc_vehicle.h"
+#include "sc_traffic_lanes.h"
+#include "sc_traffic_spawner.h"
+#include "sc_traffic_lod.h"
+#include "sc_traffic_ai.h"
 
 #include <SDL.h>
 #include <thread>
@@ -169,6 +173,43 @@ int main()
   physicsDraw.debug = &physicsDebug;
   physicsDraw.draw = &debugDraw;
 
+  sc::TrafficLaneGraph trafficLanes{};
+  sc::TrafficDebugState trafficDebug{};
+
+  sc::TrafficSpawnerState trafficSpawner{};
+  trafficSpawner.streaming = &worldStreaming;
+  trafficSpawner.lanes = &trafficLanes;
+  trafficSpawner.debug = &trafficDebug;
+  trafficSpawner.vehicleDebug = &vehicleDebug;
+  trafficSpawner.meshId = 1u;
+
+  sc::TrafficLODState trafficLod{};
+  trafficLod.streaming = &worldStreaming;
+  trafficLod.lanes = &trafficLanes;
+  trafficLod.debug = &trafficDebug;
+  trafficLod.vehicleDebug = &vehicleDebug;
+  trafficLod.meshId = 1u;
+
+  sc::TrafficAIState trafficAI{};
+  trafficAI.lanes = &trafficLanes;
+  trafficAI.debug = &trafficDebug;
+  trafficAI.physics = &physicsWorld;
+  trafficAI.streaming = &worldStreaming;
+
+  sc::TrafficPhysicsSyncState trafficPhysSync{};
+  trafficPhysSync.physics = &physicsWorld;
+  trafficPhysSync.debug = &trafficDebug;
+
+  sc::TrafficDebugDrawState trafficDrawState{};
+  trafficDrawState.lanes = &trafficLanes;
+  trafficDrawState.debug = &trafficDebug;
+  trafficDrawState.draw = &debugDraw;
+  trafficDrawState.physics = &physicsWorld;
+
+  sc::TrafficPinState trafficPins{};
+  trafficPins.streaming = &worldStreaming;
+  trafficPins.debug = &trafficDebug;
+
   sc::PhysicsDemoState physicsDemo{};
   physicsDemo.debug = &physicsDebug;
   {
@@ -186,6 +227,8 @@ int main()
   physicsDemo.materialId = (checkerMat != sc::kInvalidMaterialHandle) ? checkerMat : 0u;
 
   vehicleDemo.materialId = physicsDemo.materialId;
+  trafficSpawner.materialId = vehicleDemo.materialId;
+  trafficLod.materialId = vehicleDemo.materialId;
   vehicleDemo.spawnPos[0] = sectorSize * 0.5f;
   vehicleDemo.spawnPos[1] = 2.0f;
   vehicleDemo.spawnPos[2] = sectorSize * 0.5f;
@@ -197,18 +240,24 @@ int main()
   scheduler.addSystem("Spawner", sc::SystemPhase::Simulation, sc::SpawnerSystem, &spawner);
   scheduler.addSystem("VehicleDemo", sc::SystemPhase::Simulation, sc::VehicleDemoSystem, &vehicleDemo, { "Spawner" });
   scheduler.addSystem("VehicleStreamingPin", sc::SystemPhase::Simulation, sc::VehicleStreamingPinSystem, &vehiclePins, { "VehicleDemo" });
-  scheduler.addSystem("WorldStreaming", sc::SystemPhase::Simulation, sc::WorldStreamingSystem, &worldStreaming, { "Spawner", "VehicleStreamingPin" });
+  scheduler.addSystem("TrafficPin", sc::SystemPhase::Simulation, sc::TrafficPinSystem, &trafficPins, { "VehicleStreamingPin" });
+  scheduler.addSystem("WorldStreaming", sc::SystemPhase::Simulation, sc::WorldStreamingSystem, &worldStreaming, { "Spawner", "TrafficPin" });
+  scheduler.addSystem("TrafficSpawner", sc::SystemPhase::Simulation, sc::TrafficSpawnerSystem, &trafficSpawner, { "WorldStreaming" });
+  scheduler.addSystem("TrafficLOD", sc::SystemPhase::Simulation, sc::TrafficLODSystem, &trafficLod, { "TrafficSpawner" });
   scheduler.addSystem("PhysicsDemo", sc::SystemPhase::Simulation, sc::PhysicsDemoSystem, &physicsDemo, { "WorldStreaming" });
-  scheduler.addSystem("VehiclePreStep", sc::SystemPhase::FixedUpdate, sc::VehicleSystemPreStep, &vehicleSystem, { "PhysicsDemo" });
+  scheduler.addSystem("TrafficAI", sc::SystemPhase::FixedUpdate, sc::TrafficAISystem, &trafficAI, { "TrafficLOD" });
+  scheduler.addSystem("VehiclePreStep", sc::SystemPhase::FixedUpdate, sc::VehicleSystemPreStep, &vehicleSystem, { "PhysicsDemo", "TrafficAI" });
   scheduler.addSystem("PhysicsSync", sc::SystemPhase::FixedUpdate, sc::PhysicsSyncSystem, &physicsSync, { "PhysicsDemo", "VehiclePreStep" });
-  scheduler.addSystem("VehiclePostStep", sc::SystemPhase::FixedUpdate, sc::VehicleSystemPostStep, &vehicleSystem, { "PhysicsSync" });
+  scheduler.addSystem("TrafficPhysicsSync", sc::SystemPhase::FixedUpdate, sc::TrafficPhysicsSyncSystem, &trafficPhysSync, { "PhysicsSync" });
+  scheduler.addSystem("VehiclePostStep", sc::SystemPhase::FixedUpdate, sc::VehicleSystemPostStep, &vehicleSystem, { "TrafficPhysicsSync" });
   scheduler.addSystem("VehicleCamera", sc::SystemPhase::RenderPrep, sc::VehicleCameraSystem, &vehicleCamera);
   scheduler.addSystem("Transform", sc::SystemPhase::RenderPrep, sc::TransformSystem, nullptr, { "PhysicsDemo", "VehicleCamera" });
   scheduler.addSystem("Camera", sc::SystemPhase::RenderPrep, sc::CameraSystem, &cameraState, { "Transform" });
   scheduler.addSystem("Culling", sc::SystemPhase::RenderPrep, sc::CullingSystem, &culling, { "Camera" });
   scheduler.addSystem("RenderPrep", sc::SystemPhase::RenderPrep, sc::RenderPrepStreamingSystem, &renderPrep, { "Culling" });
   scheduler.addSystem("DebugDraw", sc::SystemPhase::RenderPrep, sc::DebugDrawSystem, &debugDrawState, { "RenderPrep" });
-  scheduler.addSystem("VehicleDebugDraw", sc::SystemPhase::RenderPrep, sc::VehicleDebugDrawSystem, &vehicleDraw, { "DebugDraw" });
+  scheduler.addSystem("TrafficDebugDraw", sc::SystemPhase::RenderPrep, sc::TrafficDebugDrawSystem, &trafficDrawState, { "DebugDraw" });
+  scheduler.addSystem("VehicleDebugDraw", sc::SystemPhase::RenderPrep, sc::VehicleDebugDrawSystem, &vehicleDraw, { "TrafficDebugDraw" });
   scheduler.addSystem("PhysicsDebugDraw", sc::SystemPhase::RenderPrep, sc::PhysicsDebugDrawSystem, &physicsDraw, { "VehicleDebugDraw" });
   scheduler.addSystem("Debug", sc::SystemPhase::Render, sc::DebugSystem, nullptr, { "DebugDraw" });
   scheduler.finalize();
@@ -267,6 +316,7 @@ int main()
     vk.setDebugDraw(&debugDraw);
     vk.setPhysicsContext(&physicsDebug);
     vk.setVehicleContext(&vehicleDebug);
+    vk.setTrafficContext(&trafficDebug);
 
     if (vk.beginFrame())
       vk.endFrame();

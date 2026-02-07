@@ -21,6 +21,7 @@ namespace sc
   struct RenderPrepStreamingState;
   struct PhysicsDebugState;
   struct VehicleDebugState;
+  struct TrafficDebugState;
 
   class DebugUI
   {
@@ -52,6 +53,7 @@ namespace sc
                                   RenderPrepStreamingState* renderPrep);
     void setPhysicsContext(PhysicsDebugState* physics) { m_physics = physics; }
     void setVehicleContext(VehicleDebugState* vehicle) { m_vehicleDebug = vehicle; }
+    void setTrafficContext(TrafficDebugState* traffic) { m_trafficDebug = traffic; }
     void setDebugDraw(DebugDraw* draw) { m_debugDraw = draw; }
     void setAssetPanelData(const AssetStatsSnapshot& stats,
                            const std::vector<std::string>& labels,
@@ -106,6 +108,7 @@ namespace sc
     DebugDraw* m_debugDraw = nullptr;
     PhysicsDebugState* m_physics = nullptr;
     VehicleDebugState* m_vehicleDebug = nullptr;
+    TrafficDebugState* m_trafficDebug = nullptr;
 
     AssetStatsSnapshot m_assetStats{};
     std::vector<std::string> m_assetLabels;

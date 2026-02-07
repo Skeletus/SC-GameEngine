@@ -9,6 +9,10 @@ target_sources(sc_engine
     src/sc_vk.cpp
     physics/sc_physics.cpp
     physics/sc_vehicle.cpp
+    traffic/sc_traffic_ai.cpp
+    traffic/sc_traffic_lanes.cpp
+    traffic/sc_traffic_lod.cpp
+    traffic/sc_traffic_spawner.cpp
     world/sc_world_partition.cpp
 )
 
@@ -16,6 +20,7 @@ target_include_directories(sc_engine
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/physics
+    ${CMAKE_CURRENT_SOURCE_DIR}/traffic
     ${CMAKE_CURRENT_SOURCE_DIR}/world
     ${CMAKE_SOURCE_DIR}/third_party
 )

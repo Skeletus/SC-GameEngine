@@ -1,7 +1,9 @@
 #include "sc_vehicle.h"
 #include "sc_world_partition.h"
 #include "sc_debug_draw.h"
+#include "sc_log.h"
 #include "sc_math.h"
+#include "sc_traffic_common.h"
 
 #include <SDL.h>
 
@@ -94,17 +96,17 @@ namespace sc
       return fallback;
     }
 
-    static Entity pickActiveVehicle(World& world, VehicleDebugState* debug)
+    static Entity pickPlayerVehicle(World& world, VehicleDebugState* debug, bool& warned)
     {
       if (debug && isValidEntity(debug->activeVehicle) &&
           world.isAlive(debug->activeVehicle) &&
-          world.has<VehicleRuntime>(debug->activeVehicle))
+          world.has<PlayerVehicle>(debug->activeVehicle))
       {
         return debug->activeVehicle;
       }
 
       Entity active = kInvalidEntity;
-      world.ForEach<VehicleRuntime>([&](Entity e, VehicleRuntime&)
+      world.ForEach<PlayerVehicle>([&](Entity e, PlayerVehicle&)
       {
         if (!isValidEntity(active))
           active = e;
@@ -112,6 +114,13 @@ namespace sc
 
       if (debug)
         debug->activeVehicle = active;
+
+      if (!isValidEntity(active) && !warned)
+      {
+        warned = true;
+        sc::log(sc::LogLevel::Warn, "PlayerVehicle not found; skipping player vehicle control.");
+      }
+
       return active;
     }
   }
@@ -122,23 +131,13 @@ namespace sc
     VehicleInputState* state = static_cast<VehicleInputState*>(user);
     VehicleDebugState* debug = state ? state->debug : nullptr;
 
-    Entity active = pickActiveVehicle(world, debug);
+    static bool warnedNoPlayer = false;
+    Entity active = pickPlayerVehicle(world, debug, warnedNoPlayer);
 
     world.ForEach<VehicleInput>([&](Entity, VehicleInput& in)
     {
       in = {};
     });
-
-    if (!isValidEntity(active))
-    {
-      world.ForEach<VehicleInput, VehicleComponent>([&](Entity e, VehicleInput&, VehicleComponent&)
-      {
-        if (!isValidEntity(active))
-          active = e;
-      });
-      if (debug)
-        debug->activeVehicle = active;
-    }
 
     if (!isValidEntity(active))
       return;
@@ -217,9 +216,34 @@ namespace sc
           body = *existing;
       }
 
+      if (body.valid())
+      {
+        RigidBodyType bodyType = RigidBodyType::Static;
+        if (physics.getBodyType(body, bodyType) && bodyType != RigidBodyType::Dynamic)
+        {
+          physics.removeRigidBody(body);
+          world.remove<PhysicsBodyHandle>(e);
+          body = {};
+        }
+      }
+
       if (!body.valid())
       {
-        body = physics.addRigidBodyWithComOffset(e, tr, rb, col, vc.centerOfMassOffset);
+        Transform comTr = tr;
+        if (world.has<TrafficVehicle>(e))
+        {
+          const float off[3] = { vc.centerOfMassOffset[0], vc.centerOfMassOffset[1], vc.centerOfMassOffset[2] };
+          if (std::fabs(off[0]) > 1e-5f || std::fabs(off[1]) > 1e-5f || std::fabs(off[2]) > 1e-5f)
+          {
+            float rotOff[3]{};
+            rotateVecEuler(tr.localRot, off, rotOff);
+            comTr.localPos[0] += rotOff[0];
+            comTr.localPos[1] += rotOff[1];
+            comTr.localPos[2] += rotOff[2];
+          }
+        }
+
+        body = physics.addRigidBodyWithComOffset(e, comTr, rb, col, vc.centerOfMassOffset);
         if (!body.valid())
           return;
 
@@ -236,7 +260,7 @@ namespace sc
           }
         }
         if (!alreadyTracked)
-          state->sync->tracked.push_back({ e, body });
+          state->sync->tracked.push_back({ e, body, rb.type });
       }
 
       const float sx = std::fabs(tr.localScale[0]) > 1e-6f ? std::fabs(tr.localScale[0]) : 1.0f;
@@ -248,7 +272,9 @@ namespace sc
       const float hz = std::max(0.4f, col.halfExtents[2] * sz);
 
       const float wheelX = hx - vc.wheelWidth * 0.5f;
-      const float wheelY = -hy + vc.wheelRadius;
+      float wheelY = -hy + vc.wheelRadius;
+      if (world.has<TrafficVehicle>(e))
+        wheelY -= vc.suspensionRestLength;
       const float wheelFrontZ = hz - vc.wheelRadius * 0.5f;
       const float wheelRearZ = -hz + vc.wheelRadius * 0.5f;
 
@@ -287,6 +313,32 @@ namespace sc
       rt.wheelCount = 4u;
 
       state->tracked.push_back({ e, vh, body });
+
+      if (TrafficVehicle* tv = world.get<TrafficVehicle>(e))
+      {
+        if (tv->mode == TrafficSimMode::Physics)
+        {
+          const bool bodyInWorld = physics.isBodyInWorld(body);
+          const bool vehicleInWorld = physics.isVehicleInWorld(vh);
+          const bool active = physics.isBodyActive(body);
+          float mass = 0.0f;
+          uint32_t flags = 0u;
+          physics.getBodyMass(body, mass);
+          physics.getBodyCollisionFlags(body, flags);
+          const bool runtimeValid = vh.valid() && rt.wheelCount > 0u;
+          sc::log(sc::LogLevel::Info,
+                  "Traffic promote Tier A: e=%u wheels=%u mass=%.1f flags=0x%X valid=%s bodyInWorld=%s vehicleInWorld=%s active=%s pos=(%.2f,%.2f,%.2f)",
+                  e.index(),
+                  rt.wheelCount,
+                  mass,
+                  flags,
+                  runtimeValid ? "YES" : "NO",
+                  bodyInWorld ? "YES" : "NO",
+                  vehicleInWorld ? "YES" : "NO",
+                  active ? "YES" : "NO",
+                  tr.localPos[0], tr.localPos[1], tr.localPos[2]);
+        }
+      }
 
       if (state->debug && !isValidEntity(state->debug->activeVehicle))
         state->debug->activeVehicle = e;
@@ -362,15 +414,18 @@ namespace sc
 
       physics.getVehicleTelemetry(rt.handle, rt, vc.suspensionRestLength);
 
-      const float off[3] = { vc.centerOfMassOffset[0], vc.centerOfMassOffset[1], vc.centerOfMassOffset[2] };
-      if (std::fabs(off[0]) > 1e-5f || std::fabs(off[1]) > 1e-5f || std::fabs(off[2]) > 1e-5f)
+      if (!world.has<TrafficVehicle>(e))
       {
-        float rotOff[3]{};
-        rotateVecEuler(tr.localRot, off, rotOff);
-        tr.localPos[0] -= rotOff[0];
-        tr.localPos[1] -= rotOff[1];
-        tr.localPos[2] -= rotOff[2];
-        tr.dirty = true;
+        const float off[3] = { vc.centerOfMassOffset[0], vc.centerOfMassOffset[1], vc.centerOfMassOffset[2] };
+        if (std::fabs(off[0]) > 1e-5f || std::fabs(off[1]) > 1e-5f || std::fabs(off[2]) > 1e-5f)
+        {
+          float rotOff[3]{};
+          rotateVecEuler(tr.localRot, off, rotOff);
+          tr.localPos[0] -= rotOff[0];
+          tr.localPos[1] -= rotOff[1];
+          tr.localPos[2] -= rotOff[2];
+          tr.dirty = true;
+        }
       }
 
       if (debug && debug->activeVehicle == e)
@@ -435,6 +490,7 @@ namespace sc
     vc.centerOfMassOffset[2] = 0.0f;
 
     world.add<VehicleInput>(state->vehicle);
+    world.add<PlayerVehicle>(state->vehicle);
 
     setName(world.add<Name>(state->vehicle), "Vehicle");
 
@@ -454,7 +510,8 @@ namespace sc
     state->streaming->pinnedCenters.clear();
     state->streaming->pinnedRadius = state->pinRadius;
 
-    const Entity activeVehicle = pickActiveVehicle(world, state->debug);
+    static bool warnedNoPlayer = false;
+    const Entity activeVehicle = pickPlayerVehicle(world, state->debug, warnedNoPlayer);
     if (!isValidEntity(activeVehicle))
       return;
 
@@ -476,7 +533,8 @@ namespace sc
     if (state->debug && !state->debug->cameraEnabled)
       return;
 
-    const Entity vehicle = pickActiveVehicle(world, state->debug);
+    static bool warnedNoPlayer = false;
+    const Entity vehicle = pickPlayerVehicle(world, state->debug, warnedNoPlayer);
     if (!isValidEntity(vehicle))
       return;
 
@@ -600,7 +658,8 @@ namespace sc
     if (!state->debug->showWheelRaycasts && !state->debug->showContactPoints)
       return;
 
-    const Entity active = pickActiveVehicle(world, state->debug);
+    static bool warnedNoPlayer = false;
+    const Entity active = pickPlayerVehicle(world, state->debug, warnedNoPlayer);
     const bool onlyActive = isValidEntity(active);
 
     const float rayColor[3] = { 0.9f, 0.6f, 0.2f };
