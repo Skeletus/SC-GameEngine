@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -11,6 +12,12 @@
 
 namespace sc
 {
+  namespace
+  {
+    std::filesystem::path g_assetOverride;
+    bool g_assetOverrideSet = false;
+  }
+
   std::filesystem::path exeDir()
   {
 #if defined(_WIN32)
@@ -24,6 +31,15 @@ namespace sc
 
   std::filesystem::path assetsRoot()
   {
+    if (g_assetOverrideSet)
+      return g_assetOverride;
+
+    if (const char* envRoot = std::getenv("SC_ASSET_ROOT"))
+    {
+      if (*envRoot != '\0')
+        return std::filesystem::path(envRoot);
+    }
+
     const std::filesystem::path exe = exeDir();
     const std::array<std::filesystem::path, 3> candidates =
     {
@@ -85,5 +101,19 @@ namespace sc
       hash *= 1099511628211ull;
     }
     return hash;
+  }
+
+  void setAssetsRootOverride(const std::filesystem::path& path)
+  {
+    if (path.empty())
+      return;
+    g_assetOverride = path;
+    g_assetOverrideSet = true;
+  }
+
+  void clearAssetsRootOverride()
+  {
+    g_assetOverride.clear();
+    g_assetOverrideSet = false;
   }
 }

@@ -3,6 +3,7 @@
 #include "sc_jobs.h"
 #include "sc_assets.h"
 #include "sc_paths.h"
+#include "world_format.h"
 #include "sc_physics.h"
 #include "sc_traffic_common.h"
 
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +25,11 @@ namespace sc
   {
     static constexpr float kPi = 3.1415926535f;
     static constexpr AABB kUnitCubeBounds{ { -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f } };
+    static constexpr const char* kMeshCubePath = "meshes/cube";
+    static constexpr const char* kMeshTrianglePath = "meshes/triangle";
+    static constexpr const char* kMaterialUnlitPath = "materials/unlit";
+    static constexpr const char* kMaterialCheckerPath = "materials/checker";
+    static constexpr const char* kMaterialTestPath = "materials/test";
 
     static uint32_t mix32(uint32_t x)
     {
@@ -52,6 +59,23 @@ namespace sc
     static float lerp(float a, float b, float t)
     {
       return a + (b - a) * t;
+    }
+
+    static AssetId assetIdFromPath(const char* path)
+    {
+      if (!path)
+        return 0;
+      return sc::fnv1a64(sc::normalizePathForId(path));
+    }
+
+    static std::filesystem::path worldRootPath()
+    {
+      if (const char* envRoot = std::getenv("SC_WORLD_ROOT"))
+      {
+        if (*envRoot != '\0')
+          return std::filesystem::path(envRoot);
+      }
+      return sc::resolveAssetPath("world");
     }
 
     static bool coordLess(const SectorCoord& a, const SectorCoord& b)
@@ -105,8 +129,8 @@ namespace sc
         ground.scale[0] = size;
         ground.scale[1] = 0.10f;
         ground.scale[2] = size;
-        ground.meshId = 1u;
-        ground.materialId = 2u; // default unlit material
+        ground.meshAssetId = assetIdFromPath(kMeshCubePath);
+        ground.materialAssetId = assetIdFromPath(kMaterialUnlitPath);
         ground.localBounds = kUnitCubeBounds;
         outSpawns.push_back(ground);
       }
@@ -133,8 +157,11 @@ namespace sc
         rec.scale[2] = sz;
 
         const float m = rand01(rng);
-        rec.materialId = (m < 0.40f) ? 0u : ((m < 0.80f) ? 1u : 2u);
-        rec.meshId = (rand01(rng) < 0.90f) ? 1u : 0u;
+        rec.materialAssetId = (m < 0.40f) ? assetIdFromPath(kMaterialCheckerPath)
+                                         : ((m < 0.80f) ? assetIdFromPath(kMaterialTestPath)
+                                                        : assetIdFromPath(kMaterialUnlitPath));
+        rec.meshAssetId = (rand01(rng) < 0.90f) ? assetIdFromPath(kMeshCubePath)
+                                                : assetIdFromPath(kMeshTrianglePath);
         rec.localBounds = kUnitCubeBounds;
 
         outSpawns.push_back(rec);
@@ -198,6 +225,14 @@ namespace sc
       m_config.propsPerSectorMax = m_config.propsPerSectorMin;
     if (m_sectors.empty())
       m_sectors.reserve(256);
+  }
+
+  void WorldPartition::setAssetRegistryPath(const char* path)
+  {
+    if (!path || path[0] == '\0')
+      return;
+    m_assetRegistryPath = path;
+    m_assetRegistryLoaded = false;
   }
 
   void WorldPartition::setPinnedCenters(const std::vector<SectorCoord>& centers, uint32_t radius)
@@ -660,44 +695,102 @@ namespace sc
 
   bool WorldPartition::readSectorFile(const SectorCoord& coord, std::vector<SpawnRecord>& outSpawns) const
   {
-    const std::string filename = "world/sectors/sector_" + std::to_string(coord.x) + "_" + std::to_string(coord.z) + ".bin";
-    const std::filesystem::path resolved = resolveAssetPath(filename);
-    std::ifstream file(resolved, std::ios::binary);
-    if (!file.is_open())
-      return false;
-
-    struct Header
-    {
-      char magic[4];
-      uint32_t version;
-      uint32_t count;
-    } header{};
-
-    file.read(reinterpret_cast<char*>(&header), sizeof(header));
-    if (!file.good())
-      return false;
-    if (std::memcmp(header.magic, "SCS1", 4) != 0 || header.version != 1)
+    sc_world::SectorFile file{};
+    const std::filesystem::path root = worldRootPath();
+    const sc_world::SectorCoord sc{ coord.x, coord.z };
+    const std::string path = sc_world::BuildSectorPath(root.string().c_str(), sc);
+    if (!sc_world::ReadSectorFile(path.c_str(), &file))
       return false;
 
     outSpawns.clear();
-    outSpawns.resize(header.count);
-    for (uint32_t i = 0; i < header.count; ++i)
+    outSpawns.reserve(file.instances.size());
+    for (const sc_world::Instance& inst : file.instances)
     {
       SpawnRecord rec{};
-      file.read(rec.name, Name::kMax);
-      file.read(reinterpret_cast<char*>(rec.position), sizeof(float) * 3);
-      file.read(reinterpret_cast<char*>(rec.rotation), sizeof(float) * 3);
-      file.read(reinterpret_cast<char*>(rec.scale), sizeof(float) * 3);
-      file.read(reinterpret_cast<char*>(&rec.meshId), sizeof(uint32_t));
-      file.read(reinterpret_cast<char*>(&rec.materialId), sizeof(uint32_t));
-      file.read(reinterpret_cast<char*>(&rec.localBounds.min), sizeof(float) * 3);
-      file.read(reinterpret_cast<char*>(&rec.localBounds.max), sizeof(float) * 3);
-      if (!file.good())
-        return false;
-      outSpawns[i] = rec;
+      std::snprintf(rec.name, Name::kMax, "Inst_%llu", (unsigned long long)inst.id);
+      rec.position[0] = inst.transform.position[0];
+      rec.position[1] = inst.transform.position[1];
+      rec.position[2] = inst.transform.position[2];
+      rec.rotation[0] = inst.transform.rotation[0];
+      rec.rotation[1] = inst.transform.rotation[1];
+      rec.rotation[2] = inst.transform.rotation[2];
+      rec.scale[0] = inst.transform.scale[0];
+      rec.scale[1] = inst.transform.scale[1];
+      rec.scale[2] = inst.transform.scale[2];
+      rec.meshAssetId = inst.mesh_id;
+      rec.materialAssetId = inst.material_id;
+      rec.localBounds = kUnitCubeBounds;
+      outSpawns.push_back(rec);
     }
 
     return true;
+  }
+
+  void WorldPartition::ensureAssetRegistryLoaded()
+  {
+    if (m_assetRegistryLoaded)
+      return;
+    m_assetRegistryLoaded = true;
+    m_assetRegistry.clear();
+
+    if (m_assetRegistryPath.empty())
+      return;
+
+    const std::filesystem::path resolved = sc::resolveAssetPath(m_assetRegistryPath);
+    sc_world::LoadAssetRegistry(resolved.string().c_str(), m_assetRegistry);
+  }
+
+  uint32_t WorldPartition::resolveMeshHandle(AssetId assetId)
+  {
+    if (!m_assets || assetId == 0)
+      return 0;
+
+    auto it = m_meshHandleCache.find(assetId);
+    if (it != m_meshHandleCache.end())
+      return it->second;
+
+    ensureAssetRegistryLoaded();
+    const sc_world::AssetRegistryEntry* entry = sc_world::FindByMeshId(m_assetRegistry, assetId);
+    const char* meshPath = entry ? entry->mesh_path.c_str() : kMeshCubePath;
+    const MeshHandle handle = m_assets->loadMesh(meshPath);
+    const uint32_t resolved = (handle == kInvalidMeshHandle) ? 0u : handle;
+    m_meshHandleCache[assetId] = resolved;
+    return resolved;
+  }
+
+  uint32_t WorldPartition::resolveMaterialHandle(AssetId assetId)
+  {
+    if (!m_assets || assetId == 0)
+      return 0;
+
+    auto it = m_materialHandleCache.find(assetId);
+    if (it != m_materialHandleCache.end())
+      return it->second;
+
+    ensureAssetRegistryLoaded();
+    const sc_world::AssetRegistryEntry* entry = sc_world::FindByMaterialId(m_assetRegistry, assetId);
+    std::string path = entry ? entry->material_path : std::string(kMaterialUnlitPath);
+
+    sc::MaterialDesc desc{};
+    if (path.find("unlit") != std::string::npos)
+    {
+      desc.unlit = true;
+    }
+    else
+    {
+      if (path == kMaterialCheckerPath)
+        path = "textures/checker.ppm";
+      else if (path == kMaterialTestPath)
+        path = "textures/test.ppm";
+
+      desc.albedo = m_assets->loadTexture2D(path);
+      desc.unlit = false;
+    }
+
+    const MaterialHandle handle = m_assets->createMaterial(desc);
+    const uint32_t resolved = (handle == kInvalidMaterialHandle) ? 0u : handle;
+    m_materialHandleCache[assetId] = resolved;
+    return resolved;
   }
 
   void WorldPartition::dispatchPendingLoads(uint32_t maxConcurrentLoads)
@@ -831,8 +924,8 @@ namespace sc
         setLocal(t, rec.position, rec.rotation, rec.scale);
 
         RenderMesh& rm = world.add<RenderMesh>(e);
-        rm.meshId = rec.meshId;
-        rm.materialId = rec.materialId;
+        rm.meshId = resolveMeshHandle(rec.meshAssetId);
+        rm.materialId = resolveMaterialHandle(rec.materialAssetId);
 
         WorldSector& ws = world.add<WorldSector>(e);
         ws.coord = coord;

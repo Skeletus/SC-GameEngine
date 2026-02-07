@@ -61,8 +61,8 @@ function(sc_compile_shaders target)
   # Ensure the main target builds shaders first.
   add_dependencies(${target} ${SC_SHADERS_TARGET})
 
-  # Copy compiled shaders to the runtime folder next to the executable.
-  set(SC_RUNTIME_SHADER_DIR "$<TARGET_FILE_DIR:${target}>/shaders")
+  # Copy compiled shaders into assets/shaders so resolveAssetPath finds them.
+  set(SC_RUNTIME_SHADER_DIR "$<TARGET_FILE_DIR:${target}>/assets/shaders")
   add_custom_command(
     TARGET ${SC_SHADERS_TARGET}
     POST_BUILD

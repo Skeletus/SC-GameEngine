@@ -30,8 +30,8 @@ FetchContent_Declare(
 )
 
 # Queremos estático (más simple para el engine al inicio)
-set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-set(SDL_STATIC ON  CACHE BOOL "" FORCE)
+set(SDL_SHARED ON CACHE BOOL "" FORCE)
+set(SDL_STATIC OFF CACHE BOOL "" FORCE)
 
 # Clave: evita rutas del CMake de SDL que esperan targets "SDL2"
 set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
@@ -39,6 +39,8 @@ set(SDL_TEST            OFF CACHE BOOL "" FORCE)
 
 # Opcional: si NO quieres SDL2main (tú ya usas SDL_MAIN_HANDLED)
 set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
+set(SDL_VULKAN ON CACHE BOOL "" FORCE)
+set(SDL_LOADSO ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(SDL2)
 
@@ -53,7 +55,7 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(imgui)
 
-add_library(imgui STATIC
+add_library(imgui SHARED
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_demo.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -68,7 +70,11 @@ target_include_directories(imgui PUBLIC
   ${imgui_SOURCE_DIR}/backends
 )
 
-target_link_libraries(imgui PUBLIC SDL2::SDL2-static Vulkan::Vulkan)
+target_link_libraries(imgui PUBLIC SDL2::SDL2 Vulkan::Vulkan)
+
+set_target_properties(imgui PROPERTIES
+  WINDOWS_EXPORT_ALL_SYMBOLS ON
+)
 
 # Bullet Physics
 FetchContent_Declare(
@@ -92,5 +98,7 @@ FetchContent_MakeAvailable(bullet3)
 # Engine modules
 # -------------------------
 add_subdirectory(src/core)
+add_subdirectory(tools/shared)
 add_subdirectory(src/engine)
 add_subdirectory(src/sandbox)
+add_subdirectory(tools/world_editor)

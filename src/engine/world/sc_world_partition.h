@@ -1,11 +1,13 @@
 #pragma once
 
 #include "sc_ecs.h"
+#include "asset_registry.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -13,6 +15,7 @@ namespace sc
 {
   class DebugDraw;
   class AssetManager;
+  using AssetId = sc_world::AssetId;
 
   struct Vec3
   {
@@ -69,8 +72,8 @@ namespace sc
     float position[3] = { 0.0f, 0.0f, 0.0f };
     float rotation[3] = { 0.0f, 0.0f, 0.0f };
     float scale[3] = { 1.0f, 1.0f, 1.0f };
-    uint32_t meshId = 1;
-    uint32_t materialId = 0;
+    AssetId meshAssetId = 0;
+    AssetId materialAssetId = 0;
     AABB localBounds{};
   };
 
@@ -194,6 +197,8 @@ namespace sc
 
     void configure(const WorldPartitionConfig& config);
     const WorldPartitionConfig& config() const { return m_config; }
+    void setAssetManager(AssetManager* assets) { m_assets = assets; }
+    void setAssetRegistryPath(const char* path);
 
     SectorCoord worldToSector(const Vec3& pos) const;
     AABB sectorBounds(const SectorCoord& coord) const;
@@ -241,6 +246,9 @@ namespace sc
     bool isSectorDesired(const SectorCoord& coord) const;
     bool isSectorPinned(const SectorCoord& coord) const;
     float sectorPriority(const SectorCoord& coord, const SectorCoord& cameraSector, const Vec3& cameraForward, float frustumBiasWeight, bool useFrustumBias) const;
+    void ensureAssetRegistryLoaded();
+    uint32_t resolveMeshHandle(AssetId assetId);
+    uint32_t resolveMaterialHandle(AssetId assetId);
 
   private:
     WorldPartitionConfig m_config{};
@@ -272,6 +280,13 @@ namespace sc
     uint32_t m_lastUnloadRadius = 0;
     bool m_lastUseFrustumBias = false;
     float m_lastFrustumBiasWeight = 0.0f;
+
+    AssetManager* m_assets = nullptr;
+    std::string m_assetRegistryPath = "world/asset_registry.txt";
+    bool m_assetRegistryLoaded = false;
+    std::vector<sc_world::AssetRegistryEntry> m_assetRegistry;
+    std::unordered_map<AssetId, uint32_t> m_meshHandleCache;
+    std::unordered_map<AssetId, uint32_t> m_materialHandleCache;
   };
 
   struct WorldSector

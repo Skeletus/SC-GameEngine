@@ -10,6 +10,7 @@
 
 struct SDL_Window;
 union SDL_Event;
+struct ImDrawData;
 
 namespace sc
 {
@@ -77,8 +78,13 @@ namespace sc
 
     float swapchainAspect() const;
 
+    bool initExternalImGui();
+    void shutdownExternalImGui();
+    void newExternalImGuiFrame();
+    void setExternalImGuiDrawData(const ImDrawData* drawData) { m_externalImGuiDrawData = drawData; }
+
   private:
-    bool createInstance();
+    bool createInstance(SDL_Window* window);
     bool setupDebug();
     bool createSurface(SDL_Window* window);
     bool pickPhysicalDevice();
@@ -183,6 +189,10 @@ namespace sc
     uint32_t m_sceneTextureSelection = 0;
     bool m_samplerAnisotropyEnabled = false;
     float m_samplerMaxAnisotropy = 1.0f;
+
+    VkDescriptorPool m_externalImGuiPool = VK_NULL_HANDLE;
+    bool m_externalImGuiInitialized = false;
+    const ImDrawData* m_externalImGuiDrawData = nullptr;
 
     VkBuffer m_debugVertexBuffers[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     VkDeviceMemory m_debugVertexMemory[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };

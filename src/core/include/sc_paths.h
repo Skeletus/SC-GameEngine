@@ -13,4 +13,7 @@ namespace sc
   std::string normalizePathForId(const std::filesystem::path& path);
 
   uint64_t fnv1a64(std::string_view text);
+
+  void setAssetsRootOverride(const std::filesystem::path& path);
+  void clearAssetsRootOverride();
 }

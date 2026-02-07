@@ -29,3 +29,21 @@ add_custom_command(
           "$<TARGET_FILE_DIR:sc_sandbox>/assets"
   COMMENT "Copying runtime assets folder"
 )
+
+add_custom_command(
+  TARGET sc_sandbox
+  POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:SDL2::SDL2>"
+          "$<TARGET_FILE_DIR:sc_sandbox>"
+  COMMENT "Copying SDL2 runtime"
+)
+
+add_custom_command(
+  TARGET sc_sandbox
+  POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:imgui>"
+          "$<TARGET_FILE_DIR:sc_sandbox>"
+  COMMENT "Copying ImGui runtime"
+)

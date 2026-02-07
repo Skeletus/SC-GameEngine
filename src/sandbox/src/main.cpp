@@ -78,6 +78,8 @@ int main()
   worldCfg.propsPerSectorMax = 34u;
   worldCfg.includeGroundPlane = true;
   worldStreaming.partition.configure(worldCfg);
+  worldStreaming.partition.setAssetManager(&vk.assets());
+  worldStreaming.partition.setAssetRegistryPath("world/asset_registry.txt");
 
   const float sectorSize = worldStreaming.partition.config().sectorSizeMeters;
   spawner.overrideCamera = true;

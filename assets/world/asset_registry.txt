@@ -1,0 +1,5 @@
+# label|mesh_path|material_path
+Cube|meshes/cube|materials/unlit
+CheckerCube|meshes/cube|materials/checker
+TestCube|meshes/cube|materials/test
+Triangle|meshes/triangle|materials/unlit

@@ -6,6 +6,9 @@
 #include <SDL.h>
 #include <SDL_vulkan.h>
 
+#include <imgui.h>
+#include <backends/imgui_impl_vulkan.h>
+
 #include <vector>
 #include <cstring>
 #include <algorithm>
@@ -18,6 +21,13 @@ namespace sc
   {
     Mat4 viewProj{};
   };
+
+  static void check_vk_result(VkResult r)
+  {
+    if (r == VK_SUCCESS)
+      return;
+    sc::log(sc::LogLevel::Error, "ImGui Vulkan error (%d)", (int)r);
+  }
 
   static uint32_t findMemoryType(VkPhysicalDevice phys, uint32_t typeFilter, VkMemoryPropertyFlags properties);
   static bool createBuffer(VkDevice device,
@@ -78,7 +88,7 @@ namespace sc
     m_cfg = cfg;
     m_window = window;
 
-    if (!createInstance()) return false;
+    if (!createInstance(window)) return false;
     if (m_cfg.enableValidation && !setupDebug()) return false;
     if (!createSurface(window)) return false;
     if (!pickPhysicalDevice()) return false;
@@ -124,6 +134,7 @@ namespace sc
     destroyDebugDrawBuffers();
     m_assets.shutdown();
     destroyMeshes();
+    shutdownExternalImGui();
     m_debugUI.shutdown();
 
     destroyUniformBuffers();
@@ -147,18 +158,33 @@ namespace sc
     sc::log(sc::LogLevel::Info, "Vulkan shutdown complete.");
   }
 
-  bool VkRenderer::createInstance()
+  bool VkRenderer::createInstance(SDL_Window* window)
   {
     // SDL required extensions
     unsigned extCount = 0;
-    if (!SDL_Vulkan_GetInstanceExtensions(nullptr, &extCount, nullptr) || extCount == 0)
+    if (!window)
     {
-      sc::log(sc::LogLevel::Error, "SDL_Vulkan_GetInstanceExtensions failed.");
+      sc::log(sc::LogLevel::Error, "SDL_Vulkan_GetInstanceExtensions failed: window is null.");
+      return false;
+    }
+    if (SDL_Vulkan_LoadLibrary(nullptr) != 0)
+    {
+      sc::log(sc::LogLevel::Error, "SDL_Vulkan_LoadLibrary failed: %s", SDL_GetError());
+      return false;
+    }
+
+    if (!SDL_Vulkan_GetInstanceExtensions(window, &extCount, nullptr) || extCount == 0)
+    {
+      sc::log(sc::LogLevel::Error, "SDL_Vulkan_GetInstanceExtensions failed: %s", SDL_GetError());
       return false;
     }
 
     std::vector<const char*> exts(extCount);
-    SDL_Vulkan_GetInstanceExtensions(nullptr, &extCount, exts.data());
+    if (!SDL_Vulkan_GetInstanceExtensions(window, &extCount, exts.data()))
+    {
+      sc::log(sc::LogLevel::Error, "SDL_Vulkan_GetInstanceExtensions (fill) failed: %s", SDL_GetError());
+      return false;
+    }
 
     if (m_cfg.enableValidation)
     {
@@ -365,6 +391,10 @@ namespace sc
 
     int drawableW = 0, drawableH = 0;
     SDL_Vulkan_GetDrawableSize(m_window, &drawableW, &drawableH);
+    if (drawableW <= 0 || drawableH <= 0)
+    {
+      SDL_GetWindowSize(m_window, &drawableW, &drawableH);
+    }
 
     VkExtent2D extent = caps.currentExtent;
     if (extent.width == UINT32_MAX || extent.height == UINT32_MAX)
@@ -384,8 +414,13 @@ namespace sc
 
     if (extent.width == 0 || extent.height == 0)
     {
-      sc::log(sc::LogLevel::Info, "Swapchain deferred: drawable size is %dx%d (window likely minimized).", drawableW, drawableH);
-      return false;
+      const uint32_t minW = std::max(1u, caps.minImageExtent.width);
+      const uint32_t minH = std::max(1u, caps.minImageExtent.height);
+      sc::log(sc::LogLevel::Warn, "Swapchain size invalid (%dx%d). Using minimum %ux%u and marking dirty.",
+              drawableW, drawableH, minW, minH);
+      extent.width = minW;
+      extent.height = minH;
+      m_swapchainDirty = true;
     }
 
     uint32_t imageCount = caps.minImageCount + 1;
@@ -1495,6 +1530,29 @@ namespace sc
     if (!createRenderPass()) return false;
     if (!createDepthResources()) return false;
     if (!m_debugUI.onSwapchainRecreated(m_renderPass, (uint32_t)m_swapchainImages.size())) return false;
+    if (m_externalImGuiInitialized)
+    {
+      vkDeviceWaitIdle(m_device);
+      ImGui_ImplVulkan_Shutdown();
+
+      ImGui_ImplVulkan_InitInfo info{};
+      info.Instance = m_instance;
+      info.PhysicalDevice = m_phys;
+      info.Device = m_device;
+      info.QueueFamily = m_gfxFamily;
+      info.Queue = m_gfxQueue;
+      info.DescriptorPool = m_externalImGuiPool;
+      info.RenderPass = m_renderPass;
+      info.MinImageCount = (uint32_t)m_swapchainImages.size();
+      info.ImageCount = (uint32_t)m_swapchainImages.size();
+      info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+      info.CheckVkResultFn = check_vk_result;
+
+      if (!ImGui_ImplVulkan_Init(&info))
+        return false;
+      if (!ImGui_ImplVulkan_CreateFontsTexture())
+        return false;
+    }
     if (!createPipeline()) return false;
     if (!createFramebuffers()) return false;
     if (!createCommands()) return false;
@@ -1714,6 +1772,13 @@ namespace sc
       }
     }
 
+    if (m_externalImGuiInitialized && m_externalImGuiDrawData)
+    {
+      if (m_externalImGuiDrawData->CmdListsCount > 0)
+        ImGui_ImplVulkan_RenderDrawData(const_cast<ImDrawData*>(m_externalImGuiDrawData), cmd);
+      m_externalImGuiDrawData = nullptr;
+    }
+
     m_debugUI.draw(cmd);
 
     vkCmdEndRenderPass(cmd);
@@ -1770,6 +1835,83 @@ namespace sc
 
     // avanzar frame-in-flight
     m_frameIndex = (m_frameIndex + 1) % MAX_FRAMES;
+  }
+
+  bool VkRenderer::initExternalImGui()
+  {
+    if (m_externalImGuiInitialized)
+      return true;
+
+    VkDescriptorPoolSize pool_sizes[] =
+    {
+      { VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
+      { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
+      { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
+      { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
+      { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
+      { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
+      { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
+      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
+      { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
+      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
+      { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 }
+    };
+
+    VkDescriptorPoolCreateInfo pool_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    pool_info.maxSets = 1000 * (uint32_t)(sizeof(pool_sizes) / sizeof(pool_sizes[0]));
+    pool_info.poolSizeCount = (uint32_t)(sizeof(pool_sizes) / sizeof(pool_sizes[0]));
+    pool_info.pPoolSizes = pool_sizes;
+
+    VkResult r = vkCreateDescriptorPool(m_device, &pool_info, nullptr, &m_externalImGuiPool);
+    if (r != VK_SUCCESS)
+    {
+      sc::log(sc::LogLevel::Error, "vkCreateDescriptorPool (external ImGui) failed (%d)", (int)r);
+      return false;
+    }
+
+    ImGui_ImplVulkan_InitInfo info{};
+    info.Instance = m_instance;
+    info.PhysicalDevice = m_phys;
+    info.Device = m_device;
+    info.QueueFamily = m_gfxFamily;
+    info.Queue = m_gfxQueue;
+    info.DescriptorPool = m_externalImGuiPool;
+    info.RenderPass = m_renderPass;
+    info.MinImageCount = (uint32_t)m_swapchainImages.size();
+    info.ImageCount = (uint32_t)m_swapchainImages.size();
+    info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    info.CheckVkResultFn = check_vk_result;
+
+    if (!ImGui_ImplVulkan_Init(&info))
+      return false;
+    if (!ImGui_ImplVulkan_CreateFontsTexture())
+      return false;
+
+    m_externalImGuiInitialized = true;
+    return true;
+  }
+
+  void VkRenderer::shutdownExternalImGui()
+  {
+    if (!m_externalImGuiInitialized)
+      return;
+
+    vkDeviceWaitIdle(m_device);
+    ImGui_ImplVulkan_Shutdown();
+    if (m_externalImGuiPool)
+    {
+      vkDestroyDescriptorPool(m_device, m_externalImGuiPool, nullptr);
+      m_externalImGuiPool = VK_NULL_HANDLE;
+    }
+    m_externalImGuiInitialized = false;
+  }
+
+  void VkRenderer::newExternalImGuiFrame()
+  {
+    if (!m_externalImGuiInitialized)
+      return;
+    ImGui_ImplVulkan_NewFrame();
   }
 
 }
