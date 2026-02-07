@@ -145,6 +145,8 @@ namespace editor
   EditorEntity* AddEntity(EditorDocument* doc, const sc_world::AssetRegistryEntry& asset, const EditorTransform& t);
   bool RemoveEntity(EditorDocument* doc, uint64_t id, EditorEntity* out_removed);
   EditorEntity* FindEntity(EditorDocument* doc, uint64_t id);
+  void SetSelected(EditorDocument* doc, uint64_t id);
+  void ValidateSelection(EditorDocument* doc);
 
   void ResolveEntityAssets(EditorEntity* e, ScRenderContext* render, const EditorAssetRegistry& assets);
 
@@ -154,6 +156,15 @@ namespace editor
   sc::Mat4 CameraView(const EditorCamera* cam);
   sc::Mat4 CameraProj(const EditorCamera* cam, float aspect);
   void CameraForward(const EditorCamera* cam, float out_forward[3]);
+
+  Ray computePickRay(const EditorCamera* cam,
+                     float mouse_x,
+                     float mouse_y,
+                     float viewport_x,
+                     float viewport_y,
+                     float viewport_w,
+                     float viewport_h);
+  bool intersectRayAABB(const Ray& ray, const float bmin[3], const float bmax[3], float* out_t);
 
   Ray BuildPickRay(const EditorCamera* cam,
                    float mouse_x,

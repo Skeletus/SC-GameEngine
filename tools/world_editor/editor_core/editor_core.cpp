@@ -35,38 +35,58 @@ namespace editor
         return v3(0, 0, 0);
       return mul(v, 1.0f / l);
     }
-
-    static bool rayAabb(const Ray& ray, const Vec3& bmin, const Vec3& bmax, float* out_t)
+    static void mulMat4Vec4(const sc::Mat4& m, const float v[4], float out[4])
     {
-      float tmin = 0.0f;
-      float tmax = 1e30f;
-      for (int i = 0; i < 3; ++i)
+      for (int row = 0; row < 4; ++row)
       {
-        const float origin = (&ray.origin[0])[i];
-        const float dir = (&ray.dir[0])[i];
-        float minv = (&bmin.x)[i];
-        float maxv = (&bmax.x)[i];
-        if (std::fabs(dir) < 1e-6f)
-        {
-          if (origin < minv || origin > maxv)
-            return false;
-        }
-        else
-        {
-          const float ood = 1.0f / dir;
-          float t1 = (minv - origin) * ood;
-          float t2 = (maxv - origin) * ood;
-          if (t1 > t2)
-            std::swap(t1, t2);
-          tmin = std::max(tmin, t1);
-          tmax = std::min(tmax, t2);
-          if (tmin > tmax)
-            return false;
-        }
+        out[row] =
+          m.m[0 * 4 + row] * v[0] +
+          m.m[1 * 4 + row] * v[1] +
+          m.m[2 * 4 + row] * v[2] +
+          m.m[3 * 4 + row] * v[3];
       }
-      if (out_t)
-        *out_t = tmin;
-      return true;
+    }
+
+    static bool meshBoundsValid(const ScRenderMeshInfo& info)
+    {
+      const float dx = std::fabs(info.bounds_max[0] - info.bounds_min[0]);
+      const float dy = std::fabs(info.bounds_max[1] - info.bounds_min[1]);
+      const float dz = std::fabs(info.bounds_max[2] - info.bounds_min[2]);
+      return (dx > 1e-4f) || (dy > 1e-4f) || (dz > 1e-4f);
+    }
+
+    static void getEntityWorldAabb(const EditorEntity& e, float out_min[3], float out_max[3])
+    {
+      float local_min[3] = { -0.5f, -0.5f, -0.5f };
+      float local_max[3] = { 0.5f, 0.5f, 0.5f };
+
+      if (e.meshHandle != 0 && meshBoundsValid(e.meshInfo))
+      {
+        local_min[0] = e.meshInfo.bounds_min[0];
+        local_min[1] = e.meshInfo.bounds_min[1];
+        local_min[2] = e.meshInfo.bounds_min[2];
+        local_max[0] = e.meshInfo.bounds_max[0];
+        local_max[1] = e.meshInfo.bounds_max[1];
+        local_max[2] = e.meshInfo.bounds_max[2];
+      }
+
+      float minx = local_min[0] * e.transform.scale[0];
+      float miny = local_min[1] * e.transform.scale[1];
+      float minz = local_min[2] * e.transform.scale[2];
+      float maxx = local_max[0] * e.transform.scale[0];
+      float maxy = local_max[1] * e.transform.scale[1];
+      float maxz = local_max[2] * e.transform.scale[2];
+
+      if (minx > maxx) std::swap(minx, maxx);
+      if (miny > maxy) std::swap(miny, maxy);
+      if (minz > maxz) std::swap(minz, maxz);
+
+      out_min[0] = minx + e.transform.position[0];
+      out_min[1] = miny + e.transform.position[1];
+      out_min[2] = minz + e.transform.position[2];
+      out_max[0] = maxx + e.transform.position[0];
+      out_max[1] = maxy + e.transform.position[1];
+      out_max[2] = maxz + e.transform.position[2];
     }
   }
 
@@ -140,6 +160,26 @@ namespace editor
     return nullptr;
   }
 
+  void SetSelected(EditorDocument* doc, uint64_t id)
+  {
+    if (!doc)
+      return;
+    if (id == 0)
+    {
+      doc->selectedId = 0;
+      return;
+    }
+    doc->selectedId = FindEntity(doc, id) ? id : 0;
+  }
+
+  void ValidateSelection(EditorDocument* doc)
+  {
+    if (!doc)
+      return;
+    if (doc->selectedId != 0 && !FindEntity(doc, doc->selectedId))
+      doc->selectedId = 0;
+  }
+
   void ResolveEntityAssets(EditorEntity* e, ScRenderContext* render, const EditorAssetRegistry& assets)
   {
     if (!e || !render)
@@ -183,8 +223,11 @@ namespace editor
 
     const float extent = doc->sectorSize * 0.5f;
     const float y = 0.0f;
+    const float grid = std::max(0.001f, doc->gridSize);
+    const int grid_count = static_cast<int>(std::floor((extent * 2.0f) / grid)) + 1;
+    out_lines->reserve(static_cast<size_t>(grid_count) * 2u + 4u + (doc->selectedId != 0 ? 12u : 0u));
 
-    for (float x = -extent; x <= extent; x += doc->gridSize)
+    for (float x = -extent; x <= extent; x += grid)
     {
       ScRenderLine l{};
       l.a[0] = x; l.a[1] = y; l.a[2] = -extent;
@@ -192,7 +235,7 @@ namespace editor
       l.rgba = 0x404040FF;
       out_lines->push_back(l);
     }
-    for (float z = -extent; z <= extent; z += doc->gridSize)
+    for (float z = -extent; z <= extent; z += grid)
     {
       ScRenderLine l{};
       l.a[0] = -extent; l.a[1] = y; l.a[2] = z;
@@ -224,17 +267,40 @@ namespace editor
 
       if (selected)
       {
-        const float axis_len = 2.0f;
-        const float px = selected->transform.position[0];
-        const float py = selected->transform.position[1];
-        const float pz = selected->transform.position[2];
+        float bmin[3]{};
+        float bmax[3]{};
+        getEntityWorldAabb(*selected, bmin, bmax);
+        const float minx = bmin[0];
+        const float miny = bmin[1];
+        const float minz = bmin[2];
+        const float maxx = bmax[0];
+        const float maxy = bmax[1];
+        const float maxz = bmax[2];
 
-        ScRenderLine xline{{px, py, pz},{px + axis_len, py, pz},0xFF0000FF};
-        ScRenderLine yline{{px, py, pz},{px, py + axis_len, pz},0x00FF00FF};
-        ScRenderLine zline{{px, py, pz},{px, py, pz + axis_len},0x0000FFFF};
-        out_lines->push_back(xline);
-        out_lines->push_back(yline);
-        out_lines->push_back(zline);
+        const uint32_t color = 0xFFD200FF;
+        auto push_line = [&](float ax, float ay, float az, float bx, float by, float bz)
+        {
+          ScRenderLine l{};
+          l.a[0] = ax; l.a[1] = ay; l.a[2] = az;
+          l.b[0] = bx; l.b[1] = by; l.b[2] = bz;
+          l.rgba = color;
+          out_lines->push_back(l);
+        };
+
+        push_line(minx, miny, minz, maxx, miny, minz);
+        push_line(maxx, miny, minz, maxx, miny, maxz);
+        push_line(maxx, miny, maxz, minx, miny, maxz);
+        push_line(minx, miny, maxz, minx, miny, minz);
+
+        push_line(minx, maxy, minz, maxx, maxy, minz);
+        push_line(maxx, maxy, minz, maxx, maxy, maxz);
+        push_line(maxx, maxy, maxz, minx, maxy, maxz);
+        push_line(minx, maxy, maxz, minx, maxy, minz);
+
+        push_line(minx, miny, minz, minx, maxy, minz);
+        push_line(maxx, miny, minz, maxx, maxy, minz);
+        push_line(maxx, miny, maxz, maxx, maxy, maxz);
+        push_line(minx, miny, maxz, minx, maxy, maxz);
       }
     }
   }
@@ -270,6 +336,91 @@ namespace editor
     out_forward[2] *= inv;
   }
 
+  Ray computePickRay(const EditorCamera* cam,
+                     float mouse_x,
+                     float mouse_y,
+                     float viewport_x,
+                     float viewport_y,
+                     float viewport_w,
+                     float viewport_h)
+  {
+    Ray ray{};
+    ray.origin[0] = cam->position[0];
+    ray.origin[1] = cam->position[1];
+    ray.origin[2] = cam->position[2];
+
+    const float safe_w = std::max(1.0f, viewport_w);
+    const float safe_h = std::max(1.0f, viewport_h);
+    const float ndc_x = ((mouse_x - viewport_x) / safe_w) * 2.0f - 1.0f;
+    const float ndc_y = 1.0f - ((mouse_y - viewport_y) / safe_h) * 2.0f;
+
+    const float aspect = safe_w / safe_h;
+    const sc::Mat4 view = CameraView(cam);
+    const sc::Mat4 proj = CameraProj(cam, aspect);
+    const sc::Mat4 inv_view_proj = sc::mat4_inverse(sc::mat4_mul(proj, view));
+
+    const float near_clip[4] = { ndc_x, ndc_y, 0.0f, 1.0f };
+    const float far_clip[4] = { ndc_x, ndc_y, 1.0f, 1.0f };
+    float near_world[4]{};
+    float far_world[4]{};
+    mulMat4Vec4(inv_view_proj, near_clip, near_world);
+    mulMat4Vec4(inv_view_proj, far_clip, far_world);
+
+    if (std::fabs(near_world[3]) > 1e-6f)
+    {
+      near_world[0] /= near_world[3];
+      near_world[1] /= near_world[3];
+      near_world[2] /= near_world[3];
+    }
+    if (std::fabs(far_world[3]) > 1e-6f)
+    {
+      far_world[0] /= far_world[3];
+      far_world[1] /= far_world[3];
+      far_world[2] /= far_world[3];
+    }
+
+    Vec3 cam_pos = v3(cam->position[0], cam->position[1], cam->position[2]);
+    Vec3 far_pos = v3(far_world[0], far_world[1], far_world[2]);
+    Vec3 dir = normalize(sub(far_pos, cam_pos));
+    ray.dir[0] = dir.x;
+    ray.dir[1] = dir.y;
+    ray.dir[2] = dir.z;
+    return ray;
+  }
+
+  bool intersectRayAABB(const Ray& ray, const float bmin[3], const float bmax[3], float* out_t)
+  {
+    float tmin = 0.0f;
+    float tmax = 1e30f;
+    for (int i = 0; i < 3; ++i)
+    {
+      const float origin = ray.origin[i];
+      const float dir = ray.dir[i];
+      float minv = bmin[i];
+      float maxv = bmax[i];
+      if (std::fabs(dir) < 1e-6f)
+      {
+        if (origin < minv || origin > maxv)
+          return false;
+      }
+      else
+      {
+        const float ood = 1.0f / dir;
+        float t1 = (minv - origin) * ood;
+        float t2 = (maxv - origin) * ood;
+        if (t1 > t2)
+          std::swap(t1, t2);
+        tmin = std::max(tmin, t1);
+        tmax = std::min(tmax, t2);
+        if (tmin > tmax)
+          return false;
+      }
+    }
+    if (out_t)
+      *out_t = tmin;
+    return true;
+  }
+
   Ray BuildPickRay(const EditorCamera* cam,
                    float mouse_x,
                    float mouse_y,
@@ -278,30 +429,7 @@ namespace editor
                    float viewport_w,
                    float viewport_h)
   {
-    Ray ray{};
-    ray.origin[0] = cam->position[0];
-    ray.origin[1] = cam->position[1];
-    ray.origin[2] = cam->position[2];
-
-    float ndc_x = ((mouse_x - viewport_x) / viewport_w) * 2.0f - 1.0f;
-    float ndc_y = 1.0f - ((mouse_y - viewport_y) / viewport_h) * 2.0f;
-    const float aspect = viewport_w / viewport_h;
-    const float fovRad = cam->fovDeg * 3.1415926535f / 180.0f;
-    const float tanHalf = std::tan(fovRad * 0.5f);
-
-    float forward[3]{};
-    CameraForward(cam, forward);
-    Vec3 f = v3(forward[0], forward[1], forward[2]);
-    Vec3 right = normalize(cross(f, v3(0.0f, 1.0f, 0.0f)));
-    Vec3 up = cross(right, f);
-
-    Vec3 dir = normalize(add(f,
-                      add(mul(right, ndc_x * tanHalf * aspect),
-                          mul(up, ndc_y * tanHalf))));
-    ray.dir[0] = dir.x;
-    ray.dir[1] = dir.y;
-    ray.dir[2] = dir.z;
-    return ray;
+    return computePickRay(cam, mouse_x, mouse_y, viewport_x, viewport_y, viewport_w, viewport_h);
   }
 
   uint64_t PickEntity(const EditorDocument* doc, const Ray& ray)
@@ -313,26 +441,11 @@ namespace editor
 
     for (const EditorEntity& e : doc->entities)
     {
-      float minx = e.meshInfo.bounds_min[0] * e.transform.scale[0];
-      float miny = e.meshInfo.bounds_min[1] * e.transform.scale[1];
-      float minz = e.meshInfo.bounds_min[2] * e.transform.scale[2];
-      float maxx = e.meshInfo.bounds_max[0] * e.transform.scale[0];
-      float maxy = e.meshInfo.bounds_max[1] * e.transform.scale[1];
-      float maxz = e.meshInfo.bounds_max[2] * e.transform.scale[2];
-
-      if (minx > maxx) std::swap(minx, maxx);
-      if (miny > maxy) std::swap(miny, maxy);
-      if (minz > maxz) std::swap(minz, maxz);
-
-      Vec3 bmin = v3(minx + e.transform.position[0],
-                     miny + e.transform.position[1],
-                     minz + e.transform.position[2]);
-      Vec3 bmax = v3(maxx + e.transform.position[0],
-                     maxy + e.transform.position[1],
-                     maxz + e.transform.position[2]);
-
       float t = 0.0f;
-      if (rayAabb(ray, bmin, bmax, &t))
+      float bmin[3]{};
+      float bmax[3]{};
+      getEntityWorldAabb(e, bmin, bmax);
+      if (intersectRayAABB(ray, bmin, bmax, &t))
       {
         if (t < best_t)
         {
@@ -365,7 +478,7 @@ namespace editor
     Vec3 axes[3] = { v3(1,0,0), v3(0,1,0), v3(0,0,1) };
     const float axis_len = 2.0f;
 
-    Ray ray = BuildPickRay(cam, mouse_x, mouse_y, viewport_x, viewport_y, viewport_w, viewport_h);
+    Ray ray = computePickRay(cam, mouse_x, mouse_y, viewport_x, viewport_y, viewport_w, viewport_h);
 
     if (!state->active && mouse_down)
     {

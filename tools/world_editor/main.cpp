@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <memory>
 #include <vector>
+#include <cstdint>
 
 using sc::editor::EditorAssetRegistry;
 using sc::editor::EditorCamera;
@@ -61,6 +62,131 @@ static std::string ResolveWorldRoot()
   std::filesystem::path p = ResolveAssetRoot();
   p /= "world";
   return p.string();
+}
+
+struct ViewportPanelState
+{
+  ImVec2 pos{};
+  ImVec2 size{};
+  bool hovered = false;
+  bool clicked = false;
+};
+
+static void FormatEntityLabel(const EditorEntity& e, char* out, size_t out_size)
+{
+  if (!out || out_size == 0)
+    return;
+  if (e.name[0] != '\0')
+    std::snprintf(out, out_size, "%s", e.name);
+  else
+    std::snprintf(out, out_size, "Entity %llu", (unsigned long long)e.id);
+}
+
+static void drawHierarchyPanel(EditorDocument* doc,
+                               const EditorCamera* camera,
+                               const std::string& world_root,
+                               ScRenderContext* render_ctx,
+                               const EditorAssetRegistry& registry)
+{
+  if (!doc || !camera)
+    return;
+
+  const int32_t cam_sector_x = static_cast<int32_t>(std::floor(camera->position[0] / doc->sectorSize));
+  const int32_t cam_sector_z = static_cast<int32_t>(std::floor(camera->position[2] / doc->sectorSize));
+
+  ImGui::Begin("Hierarchy");
+  ImGui::Text("Camera Sector: %d, %d", cam_sector_x, cam_sector_z);
+  ImGui::Checkbox("Snap To Grid", &doc->snapToGrid);
+  ImGui::DragFloat("Grid Size", &doc->gridSize, 0.1f, 0.1f, 10.0f);
+  if (ImGui::Button("Save Sector"))
+  {
+    doc->sector.x = cam_sector_x;
+    doc->sector.z = cam_sector_z;
+    sc_world::SectorFile file{};
+    sc::editor::SectorFileFromDocument(doc, &file);
+
+    std::filesystem::create_directories(std::filesystem::path(world_root) / "sectors");
+    const std::string path = sc_world::BuildSectorPath(world_root.c_str(), doc->sector);
+    sc_world::WriteSectorFile(path.c_str(), file);
+
+    sc_world::WorldManifest manifest{};
+    const std::string manifest_path = sc_world::BuildWorldManifestPath(world_root.c_str());
+    sc_world::ReadWorldManifest(manifest_path.c_str(), &manifest);
+    bool exists = false;
+    for (const auto& s : manifest.sectors)
+    {
+      if (s.x == doc->sector.x && s.z == doc->sector.z)
+      {
+        exists = true;
+        break;
+      }
+    }
+    if (!exists)
+      manifest.sectors.push_back(doc->sector);
+    sc_world::WriteWorldManifest(manifest_path.c_str(), manifest);
+  }
+  if (ImGui::Button("Load Sector"))
+  {
+    doc->sector.x = cam_sector_x;
+    doc->sector.z = cam_sector_z;
+    const std::string path = sc_world::BuildSectorPath(world_root.c_str(), doc->sector);
+    sc_world::SectorFile file{};
+    if (sc_world::ReadSectorFile(path.c_str(), &file))
+      sc::editor::DocumentFromSectorFile(doc, file, render_ctx, registry);
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Entities");
+  ImGui::Separator();
+  ImGui::BeginChild("HierarchyList", ImVec2(0.0f, 0.0f), true);
+  for (const auto& e : doc->entities)
+  {
+    char label[128]{};
+    FormatEntityLabel(e, label, sizeof(label));
+    ImGui::PushID(reinterpret_cast<void*>(static_cast<uintptr_t>(e.id)));
+    const bool selected = (doc->selectedId == e.id);
+    if (ImGui::Selectable(label, selected))
+      sc::editor::SetSelected(doc, e.id);
+    ImGui::PopID();
+  }
+  ImGui::EndChild();
+  ImGui::End();
+}
+
+static ViewportPanelState drawViewportPanel()
+{
+  ViewportPanelState state{};
+  ImGui::Begin("Viewport", nullptr,
+    ImGuiWindowFlags_NoScrollbar |
+    ImGuiWindowFlags_NoScrollWithMouse |
+    ImGuiWindowFlags_NoBackground);
+  state.pos = ImGui::GetCursorScreenPos();
+  state.size = ImGui::GetContentRegionAvail();
+  if (state.size.x < 1.0f) state.size.x = 1.0f;
+  if (state.size.y < 1.0f) state.size.y = 1.0f;
+  ImGui::InvisibleButton("viewport_capture", state.size);
+  state.hovered = ImGui::IsItemHovered();
+  state.clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+  ImGui::End();
+  return state;
+}
+
+static uint64_t pickEntityFromMouse(const EditorDocument* doc,
+                                    const EditorCamera* cam,
+                                    float mouse_x,
+                                    float mouse_y,
+                                    const ViewportPanelState& viewport)
+{
+  if (!doc || !cam)
+    return 0;
+  sc::editor::Ray ray = sc::editor::computePickRay(cam,
+                                                   mouse_x,
+                                                   mouse_y,
+                                                   viewport.pos.x,
+                                                   viewport.pos.y,
+                                                   viewport.size.x,
+                                                   viewport.size.y);
+  return sc::editor::PickEntity(doc, ray);
 }
 
 int main(int argc, char** argv)
@@ -161,6 +287,12 @@ int main(int argc, char** argv)
 
   bool left_mouse_down = false;
   bool left_mouse_released = false;
+
+  std::vector<ScRenderDrawItem> draw_items;
+  std::vector<ScRenderLine> debug_lines;
+  draw_items.reserve(256);
+  debug_lines.reserve(512);
+  uint64_t last_logged_selection = 0;
 
   while (running)
   {
@@ -301,54 +433,13 @@ int main(int argc, char** argv)
     }
     ImGui::End();
 
-    const int32_t cam_sector_x = static_cast<int32_t>(std::floor(camera.position[0] / doc.sectorSize));
-    const int32_t cam_sector_z = static_cast<int32_t>(std::floor(camera.position[2] / doc.sectorSize));
+    sc::editor::ValidateSelection(&doc);
 
     ImGui::Begin("Toolbar");
     ImGui::TextUnformatted("Toolbar (placeholder)");
     ImGui::End();
 
-    ImGui::Begin("Hierarchy");
-    ImGui::Text("Camera Sector: %d, %d", cam_sector_x, cam_sector_z);
-    ImGui::Checkbox("Snap To Grid", &doc.snapToGrid);
-    ImGui::DragFloat("Grid Size", &doc.gridSize, 0.1f, 0.1f, 10.0f);
-    if (ImGui::Button("Save Sector"))
-    {
-      doc.sector.x = cam_sector_x;
-      doc.sector.z = cam_sector_z;
-      sc_world::SectorFile file{};
-      sc::editor::SectorFileFromDocument(&doc, &file);
-
-      std::filesystem::create_directories(std::filesystem::path(world_root) / "sectors");
-      const std::string path = sc_world::BuildSectorPath(world_root.c_str(), doc.sector);
-      sc_world::WriteSectorFile(path.c_str(), file);
-
-      sc_world::WorldManifest manifest{};
-      const std::string manifest_path = sc_world::BuildWorldManifestPath(world_root.c_str());
-      sc_world::ReadWorldManifest(manifest_path.c_str(), &manifest);
-      bool exists = false;
-      for (const auto& s : manifest.sectors)
-      {
-        if (s.x == doc.sector.x && s.z == doc.sector.z)
-        {
-          exists = true;
-          break;
-        }
-      }
-      if (!exists)
-        manifest.sectors.push_back(doc.sector);
-      sc_world::WriteWorldManifest(manifest_path.c_str(), manifest);
-    }
-    if (ImGui::Button("Load Sector"))
-    {
-      doc.sector.x = cam_sector_x;
-      doc.sector.z = cam_sector_z;
-      const std::string path = sc_world::BuildSectorPath(world_root.c_str(), doc.sector);
-      sc_world::SectorFile file{};
-      if (sc_world::ReadSectorFile(path.c_str(), &file))
-        sc::editor::DocumentFromSectorFile(&doc, file, render_ctx, registry);
-    }
-    ImGui::End();
+    drawHierarchyPanel(&doc, &camera, world_root, render_ctx, registry);
 
     ImGui::Begin("Palette");
     for (const auto& entry : registry.entries)
@@ -380,23 +471,25 @@ int main(int argc, char** argv)
       EditorEntity* selected = sc::editor::FindEntity(&doc, doc.selectedId);
       if (selected)
       {
-        ImGui::Text("Entity %llu", (unsigned long long)selected->id);
+        if (selected->name[0] != '\0')
+          ImGui::Text("Selected: %s (id %llu)", selected->name, (unsigned long long)selected->id);
+        else
+          ImGui::Text("Selected: Entity %llu", (unsigned long long)selected->id);
+        ImGui::Separator();
         ImGui::DragFloat3("Position", selected->transform.position, 0.1f);
       }
+      else
+      {
+        ImGui::TextUnformatted("Selected: <missing>");
+      }
+    }
+    else
+    {
+      ImGui::TextUnformatted("Selected: none");
     }
     ImGui::End();
 
-    ImGui::Begin("Viewport", nullptr,
-      ImGuiWindowFlags_NoScrollbar |
-      ImGuiWindowFlags_NoScrollWithMouse |
-      ImGuiWindowFlags_NoBackground);
-    ImVec2 vp_pos = ImGui::GetWindowPos();
-    ImVec2 vp_size = ImGui::GetContentRegionAvail();
-    if (vp_size.x < 1.0f) vp_size.x = 1.0f;
-    if (vp_size.y < 1.0f) vp_size.y = 1.0f;
-    bool viewport_hovered = ImGui::IsWindowHovered();
-    ImGui::InvisibleButton("viewport_capture", vp_size);
-    ImGui::End();
+    ViewportPanelState viewport = drawViewportPanel();
 
     const bool ctrl = ImGui::GetIO().KeyCtrl;
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z))
@@ -404,17 +497,16 @@ int main(int argc, char** argv)
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y))
       cmd_stack.redoLast(&doc);
 
-    if (viewport_hovered && left_mouse_down && !ImGui::GetIO().WantCaptureMouse)
+    if (viewport.clicked && viewport.hovered)
     {
-      sc::editor::Ray ray = sc::editor::BuildPickRay(&camera,
-                                                     static_cast<float>(mx),
-                                                     static_cast<float>(my),
-                                                     vp_pos.x, vp_pos.y,
-                                                     vp_size.x, vp_size.y);
-      doc.selectedId = sc::editor::PickEntity(&doc, ray);
+      uint64_t picked = pickEntityFromMouse(&doc, &camera,
+                                            static_cast<float>(mx),
+                                            static_cast<float>(my),
+                                            viewport);
+      sc::editor::SetSelected(&doc, picked);
     }
 
-    if (doc.selectedId != 0 && viewport_hovered && !ImGui::GetIO().WantCaptureMouse)
+    if (doc.selectedId != 0 && viewport.hovered)
     {
       EditorEntity* sel = sc::editor::FindEntity(&doc, doc.selectedId);
       if (sel)
@@ -423,7 +515,7 @@ int main(int argc, char** argv)
         bool dragging = (mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
         sc::editor::GizmoTranslate(&gizmo, sel, &camera,
           static_cast<float>(mx), static_cast<float>(my),
-          vp_pos.x, vp_pos.y, vp_size.x, vp_size.y,
+          viewport.pos.x, viewport.pos.y, viewport.size.x, viewport.size.y,
           left_mouse_down, dragging, left_mouse_released,
           doc.snapToGrid, doc.gridSize);
 
@@ -458,14 +550,20 @@ int main(int argc, char** argv)
       }
     }
 
-    std::vector<ScRenderDrawItem> draw_items;
-    sc::editor::BuildDrawItems(&doc, &draw_items);
+    if (doc.selectedId != last_logged_selection)
+    {
+      if (doc.selectedId != 0)
+        std::printf("Selected entity %llu\n", (unsigned long long)doc.selectedId);
+      else if (last_logged_selection != 0)
+        std::printf("Selection cleared\n");
+      last_logged_selection = doc.selectedId;
+    }
 
-    std::vector<ScRenderLine> debug_lines;
+    sc::editor::BuildDrawItems(&doc, &draw_items);
     sc::editor::BuildDebugLines(&doc, &debug_lines);
 
-    const float vp_w = std::max(1.0f, vp_size.x);
-    const float vp_h = std::max(1.0f, vp_size.y);
+    const float vp_w = std::max(1.0f, viewport.size.x);
+    const float vp_h = std::max(1.0f, viewport.size.y);
     const sc::Mat4 view = sc::editor::CameraView(&camera);
     const sc::Mat4 proj = sc::editor::CameraProj(&camera, vp_w / vp_h);
 
