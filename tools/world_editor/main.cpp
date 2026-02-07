@@ -6,13 +6,17 @@
 
 #include "sc_engine_render.h"
 #include "editor_core/editor_core.h"
+#include "editor_core/sc_asset_db.h"
 #include "world_format.h"
+#include "sc_paths.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -29,43 +33,56 @@ using sc::editor::CmdPlaceEntity;
 using sc::editor::CmdTransformEntity;
 using sc::editor::CmdSetProperty;
 using sc::editor::GizmoState;
+using sc::editor::AssetDatabase;
+using sc::editor::AssetEntry;
+using sc::editor::AssetFolder;
+using sc::editor::AssetStatus;
+using sc::editor::AssetType;
+using sc::editor::requestLoadModelGLB;
 
 static constexpr float kEditorViewportAspect = 16.0f / 9.0f;
 
-static std::string ResolveBasePath()
+static std::filesystem::path ResolveAssetRootPath()
 {
-  char* sdl_base = SDL_GetBasePath();
-  if (sdl_base)
-  {
-    std::string out = sdl_base;
-    SDL_free(sdl_base);
-    return out;
-  }
-  return std::filesystem::current_path().string();
+  return sc::assetsRoot();
 }
 
-static std::string ResolveAssetRoot()
+static bool TryGetEnvPath(const char* name, std::filesystem::path* out_path)
 {
-  if (const char* env = std::getenv("SC_ASSET_ROOT"))
+  if (!name || !out_path)
+    return false;
+#if defined(_WIN32)
+  char* value = nullptr;
+  size_t len = 0;
+  if (_dupenv_s(&value, &len, name) != 0 || !value)
+    return false;
+  if (len <= 1)
+  {
+    free(value);
+    return false;
+  }
+  *out_path = std::filesystem::path(value);
+  free(value);
+  return true;
+#else
+  if (const char* env = std::getenv(name))
   {
     if (*env != '\0')
-      return env;
+    {
+      *out_path = std::filesystem::path(env);
+      return true;
+    }
   }
-  std::filesystem::path p = ResolveBasePath();
-  p /= "assets";
-  return p.string();
+  return false;
+#endif
 }
 
-static std::string ResolveWorldRoot()
+static std::filesystem::path ResolveWorldRootPath(const std::filesystem::path& asset_root)
 {
-  if (const char* env = std::getenv("SC_WORLD_ROOT"))
-  {
-    if (*env != '\0')
-      return env;
-  }
-  std::filesystem::path p = ResolveAssetRoot();
-  p /= "world";
-  return p.string();
+  std::filesystem::path env_path;
+  if (TryGetEnvPath("SC_WORLD_ROOT", &env_path))
+    return env_path;
+  return asset_root / "world";
 }
 
 struct ViewportPanelState
@@ -79,6 +96,287 @@ struct ViewportPanelState
   bool hovered = false;
   bool clicked = false;
 };
+
+struct ProjectPanelState
+{
+  std::string selectedFolder;
+  int filterIndex = 0;
+  char search[128] = {};
+};
+
+struct AssetSelection
+{
+  sc_world::AssetId id = 0;
+  std::string relPath;
+  std::string absPath;
+};
+
+static std::string ToLower(std::string text)
+{
+  std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c)
+  {
+    return static_cast<char>(std::tolower(c));
+  });
+  return text;
+}
+
+static void FormatAssetTime(uint64_t unix_seconds, char* out, size_t out_size)
+{
+  if (!out || out_size == 0)
+    return;
+  if (unix_seconds == 0)
+  {
+    std::snprintf(out, out_size, "<unknown>");
+    return;
+  }
+
+  std::time_t t = static_cast<std::time_t>(unix_seconds);
+  std::tm tm{};
+#if defined(_WIN32)
+  localtime_s(&tm, &t);
+#else
+  localtime_r(&t, &tm);
+#endif
+  std::snprintf(out, out_size, "%04d-%02d-%02d %02d:%02d",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min);
+}
+
+static bool AssetInFolder(const AssetEntry& entry, const std::string& folder_rel)
+{
+  std::filesystem::path rel(entry.relPath);
+  std::string parent = rel.parent_path().generic_string();
+  if (folder_rel.empty())
+    return parent.empty();
+  return parent == folder_rel;
+}
+
+static bool AssetPassesFilter(AssetType type, int filter_index)
+{
+  switch (filter_index)
+  {
+    case 1: return type == AssetType::Model;
+    case 2: return type == AssetType::Texture;
+    case 3: return type == AssetType::Shader;
+    case 4: return type == AssetType::World;
+    case 0:
+    default:
+      return true;
+  }
+}
+
+static bool AssetHasExtension(const std::string& path, const char* ext)
+{
+  if (!ext)
+    return false;
+  std::filesystem::path p(path);
+  std::string e = ToLower(p.extension().string());
+  return e == ext;
+}
+
+static void DrawFolderTreeNode(const AssetDatabase& db, int index, std::string* selected_folder)
+{
+  const auto& folders = db.getFolders();
+  if (index < 0 || index >= static_cast<int>(folders.size()))
+    return;
+
+  const AssetFolder& folder = folders[index];
+  ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanFullWidth;
+  if (folder.children.empty())
+    flags |= ImGuiTreeNodeFlags_Leaf;
+  if (index == 0)
+    flags |= ImGuiTreeNodeFlags_DefaultOpen;
+  if (selected_folder && folder.relPath == *selected_folder)
+    flags |= ImGuiTreeNodeFlags_Selected;
+
+  ImGui::PushID(folder.relPath.c_str());
+  const bool open = ImGui::TreeNodeEx(folder.name.c_str(), flags);
+  if (ImGui::IsItemClicked() && selected_folder)
+    *selected_folder = folder.relPath;
+  if (open)
+  {
+    for (int child : folder.children)
+      DrawFolderTreeNode(db, child, selected_folder);
+    ImGui::TreePop();
+  }
+  ImGui::PopID();
+}
+
+static void DrawProjectPanel(AssetDatabase* db, ProjectPanelState* state, AssetSelection* selection)
+{
+  if (!db || !state)
+    return;
+
+  ImGui::Begin("Project");
+
+  if (db->findFolderIndex(state->selectedFolder) < 0)
+    state->selectedFolder.clear();
+
+  const std::filesystem::path& root = db->root();
+  if (!db->hasValidRoot())
+  {
+    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                       "Asset root missing: %s",
+                       root.string().c_str());
+  }
+
+  const char* filter_labels[] = { "All", "Models", "Textures", "Shaders", "World" };
+  ImGui::SetNextItemWidth(140.0f);
+  ImGui::Combo("##asset_filter", &state->filterIndex, filter_labels, IM_ARRAYSIZE(filter_labels));
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(220.0f);
+  ImGui::InputTextWithHint("##asset_search", "Search...", state->search, sizeof(state->search));
+  ImGui::SameLine();
+  if (ImGui::Button("Rescan"))
+    db->scanAll();
+
+  ImGui::Separator();
+
+  if (ImGui::BeginTable("ProjectSplit", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV))
+  {
+    ImGui::TableSetupColumn("Folders", ImGuiTableColumnFlags_WidthFixed, 220.0f);
+    ImGui::TableSetupColumn("Assets", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::BeginChild("ProjectFolders", ImVec2(0.0f, 0.0f), true);
+    const auto& folders = db->getFolders();
+    if (!folders.empty())
+      DrawFolderTreeNode(*db, 0, &state->selectedFolder);
+    else
+      ImGui::TextDisabled("No folders indexed.");
+    ImGui::EndChild();
+
+    ImGui::TableSetColumnIndex(1);
+    ImGui::BeginChild("ProjectFiles", ImVec2(0.0f, 0.0f), true);
+
+    std::vector<const AssetEntry*> filtered;
+    filtered.reserve(db->getAll().size());
+
+    const std::string search_text = ToLower(state->search);
+    for (const auto& entry : db->getAll())
+    {
+      if (!AssetInFolder(entry, state->selectedFolder))
+        continue;
+      if (!AssetPassesFilter(entry.type, state->filterIndex))
+        continue;
+      if (!search_text.empty())
+      {
+        const std::string hay = ToLower(entry.relPath);
+        if (hay.find(search_text) == std::string::npos)
+          continue;
+      }
+      filtered.push_back(&entry);
+    }
+
+    std::sort(filtered.begin(), filtered.end(), [](const AssetEntry* a, const AssetEntry* b)
+    {
+      const std::string an = ToLower(std::filesystem::path(a->relPath).filename().string());
+      const std::string bn = ToLower(std::filesystem::path(b->relPath).filename().string());
+      return an < bn;
+    });
+
+    ImGuiTableFlags table_flags = ImGuiTableFlags_RowBg |
+                                  ImGuiTableFlags_ScrollY |
+                                  ImGuiTableFlags_Resizable |
+                                  ImGuiTableFlags_BordersInnerV;
+    if (ImGui::BeginTable("ProjectAssetsTable", 4, table_flags))
+    {
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+      ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+      ImGui::TableSetupColumn("Modified", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+      ImGui::TableHeadersRow();
+
+      if (filtered.empty())
+      {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextDisabled("No assets in folder.");
+      }
+      else
+      {
+        for (const AssetEntry* entry : filtered)
+        {
+          const std::string name = std::filesystem::path(entry->relPath).filename().string();
+          const bool is_selected = selection && selection->id == entry->id;
+
+          ImGui::TableNextRow();
+          ImGui::TableSetColumnIndex(0);
+          ImGui::PushID(entry->relPath.c_str());
+          if (ImGui::Selectable(name.c_str(), is_selected,
+                                ImGuiSelectableFlags_SpanAllColumns |
+                                ImGuiSelectableFlags_AllowDoubleClick))
+          {
+            if (selection)
+            {
+              selection->id = entry->id;
+              selection->relPath = entry->relPath;
+              selection->absPath = entry->absPath;
+            }
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+            {
+              if (entry->type == AssetType::Model && AssetHasExtension(entry->relPath, ".glb"))
+                requestLoadModelGLB(entry->id);
+            }
+          }
+
+          ImGui::TableSetColumnIndex(1);
+          ImGui::TextUnformatted(AssetTypeLabel(entry->type));
+
+          ImGui::TableSetColumnIndex(2);
+          const uint64_t kb = (entry->fileSize + 1023u) / 1024u;
+          ImGui::Text("%llu KB", static_cast<unsigned long long>(kb));
+
+          ImGui::TableSetColumnIndex(3);
+          char time_buf[32]{};
+          FormatAssetTime(entry->lastWriteTime, time_buf, sizeof(time_buf));
+          ImGui::TextUnformatted(time_buf);
+
+          ImGui::PopID();
+        }
+      }
+
+      ImGui::EndTable();
+    }
+
+    ImGui::EndChild();
+    ImGui::EndTable();
+  }
+
+  ImGui::End();
+}
+
+static void DrawAssetInspector(const AssetDatabase& db, const AssetSelection& selection)
+{
+  if (ImGui::CollapsingHeader("Asset Inspector", ImGuiTreeNodeFlags_DefaultOpen))
+  {
+    if (selection.id == 0)
+    {
+      ImGui::TextUnformatted("No asset selected.");
+      return;
+    }
+
+    const AssetEntry* entry = db.findById(selection.id);
+    if (!entry)
+    {
+      ImGui::TextUnformatted("Selected asset not found in database.");
+      ImGui::Text("AssetId: 0x%016llX", static_cast<unsigned long long>(selection.id));
+      if (!selection.relPath.empty())
+        ImGui::Text("Path: %s", selection.relPath.c_str());
+      return;
+    }
+
+    ImGui::Text("Type: %s", AssetTypeLabel(entry->type));
+    ImGui::Text("Path: %s", entry->relPath.c_str());
+    ImGui::Text("AssetId: 0x%016llX", static_cast<unsigned long long>(entry->id));
+    ImGui::Text("Size: %llu KB", static_cast<unsigned long long>((entry->fileSize + 1023u) / 1024u));
+    char time_buf[32]{};
+    FormatAssetTime(entry->lastWriteTime, time_buf, sizeof(time_buf));
+    ImGui::Text("Modified: %s", time_buf);
+    ImGui::Text("Status: %s", AssetStatusLabel(entry->status));
+  }
+}
 
 static void FormatEntityLabel(const EditorEntity& e, char* out, size_t out_size)
 {
@@ -406,7 +704,8 @@ int main(int argc, char** argv)
   }
 
   ScRenderInitParams init{};
-  const std::string asset_root = ResolveAssetRoot();
+  const std::filesystem::path asset_root_path = ResolveAssetRootPath();
+  const std::string asset_root = asset_root_path.string();
   init.asset_root = asset_root.c_str();
   init.enable_validation = 0;
   scRenderInitialize(&init);
@@ -439,9 +738,19 @@ int main(int argc, char** argv)
   sc::editor::InitDocument(&doc);
 
   EditorAssetRegistry registry;
-  std::filesystem::path registry_path = ResolveWorldRoot();
+  const std::filesystem::path world_root_path = ResolveWorldRootPath(asset_root_path);
+  std::filesystem::path registry_path = world_root_path;
   registry_path /= "asset_registry.txt";
   registry.loadFromFile(registry_path.string().c_str());
+
+  AssetDatabase asset_db;
+  asset_db.setRoot(asset_root_path);
+  asset_db.scanAll();
+  ProjectPanelState project_state;
+  project_state.selectedFolder = "";
+  AssetSelection asset_selection;
+  uint64_t last_asset_scan_ms = static_cast<uint64_t>(SDL_GetTicks());
+  const uint64_t asset_scan_interval_ms = 5000;
 
   EditorCamera camera;
   CommandStack cmd_stack;
@@ -453,7 +762,7 @@ int main(int argc, char** argv)
   doc.sector.x = initial_sector_x;
   doc.sector.z = initial_sector_z;
 
-  const std::string world_root = ResolveWorldRoot();
+  const std::string world_root = world_root_path.string();
   const std::string initial_path = sc_world::BuildSectorPath(world_root.c_str(), doc.sector);
   sc_world::SectorFile initial_file{};
   if (sc_world::ReadSectorFile(initial_path.c_str(), &initial_file))
@@ -500,6 +809,13 @@ int main(int argc, char** argv)
     uint64_t now = SDL_GetPerformanceCounter();
     float dt = static_cast<float>(static_cast<double>(now - last_counter) / static_cast<double>(perf_freq));
     last_counter = now;
+
+    const uint64_t scan_now = static_cast<uint64_t>(SDL_GetTicks());
+    if (scan_now - last_asset_scan_ms >= asset_scan_interval_ms)
+    {
+      asset_db.scanIncremental();
+      last_asset_scan_ms = scan_now;
+    }
 
     const Uint8* ks = SDL_GetKeyboardState(nullptr);
 
@@ -611,6 +927,7 @@ int main(int argc, char** argv)
 
       ImGui::DockBuilderDockWindow("Hierarchy", dock_id_left);
       ImGui::DockBuilderDockWindow("Inspector", dock_id_right);
+      ImGui::DockBuilderDockWindow("Project", dock_id_down);
       ImGui::DockBuilderDockWindow("Palette", dock_id_down);
       ImGui::DockBuilderDockWindow("Toolbar", dock_id_up);
       ImGui::DockBuilderDockWindow("Viewport", dock_main_id);
@@ -673,6 +990,8 @@ int main(int argc, char** argv)
 
     drawHierarchyPanel(&doc, &camera, world_root, render_ctx, registry);
 
+    DrawProjectPanel(&asset_db, &project_state, &asset_selection);
+
     ImGui::Begin("Palette");
     for (const auto& entry : registry.entries)
     {
@@ -695,6 +1014,8 @@ int main(int argc, char** argv)
         cmd_stack.execute(std::move(cmd), &doc);
       }
     }
+
+    DrawAssetInspector(asset_db, asset_selection);
     ImGui::End();
 
     ImGui::Begin("Inspector");

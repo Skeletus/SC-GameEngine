@@ -1,6 +1,7 @@
 add_executable(tools_world_editor
   main.cpp
   editor_core/editor_core.cpp
+  editor_core/sc_asset_db.cpp
   ${CMAKE_SOURCE_DIR}/third_party/ImGuizmo/ImGuizmo.cpp
 )
 

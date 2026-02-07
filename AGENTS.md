@@ -172,17 +172,17 @@ If a system does not scale to **thousands of entities**, it does not belong.
 * Mesh / material assignment
 * Delete / duplicate / focus
 
-#### E4 — Gizmos (IN PROGRESS)
+#### E4 — Gizmos (COMPLETED)
 
 * Move / Rotate / Scale
 * Undo / Redo
 
-#### E5 — Advanced Authoring
+#### E5 — Asset Pipeline (IN PROGRESS)
 
-* Lane editing
-* Spawner placement
-* Collider editing
-* Prefabs
+* Project Browser + Asset Database
+* Texture Import + Preview + Assignment
+* Mesh Import (glTF recomendado) + Preview + Placement
+* Prefabs (player, casa, farola) y auto-setup
 
 ---
 
