@@ -1,12 +1,14 @@
 add_executable(tools_world_editor
   main.cpp
   editor_core/editor_core.cpp
+  ${CMAKE_SOURCE_DIR}/third_party/ImGuizmo/ImGuizmo.cpp
 )
 
 include(SCShaders)
 
 target_include_directories(tools_world_editor PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/editor_core
+  ${CMAKE_SOURCE_DIR}/third_party/ImGuizmo
 )
 
 target_link_libraries(tools_world_editor PRIVATE

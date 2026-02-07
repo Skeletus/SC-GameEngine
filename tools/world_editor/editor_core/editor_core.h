@@ -77,6 +77,7 @@ namespace editor
     int axis = -1;
     float startAxisT = 0.0f;
     EditorTransform startTransform{};
+    uint64_t entityId = 0;
   };
 
   struct Command
@@ -145,6 +146,7 @@ namespace editor
   EditorEntity* AddEntity(EditorDocument* doc, const sc_world::AssetRegistryEntry& asset, const EditorTransform& t);
   bool RemoveEntity(EditorDocument* doc, uint64_t id, EditorEntity* out_removed);
   EditorEntity* FindEntity(EditorDocument* doc, uint64_t id);
+  bool SetTransform(EditorDocument* doc, uint64_t id, const EditorTransform& t);
   void SetSelected(EditorDocument* doc, uint64_t id);
   void ValidateSelection(EditorDocument* doc);
 

@@ -160,6 +160,16 @@ namespace editor
     return nullptr;
   }
 
+  bool SetTransform(EditorDocument* doc, uint64_t id, const EditorTransform& t)
+  {
+    if (EditorEntity* e = FindEntity(doc, id))
+    {
+      e->transform = t;
+      return true;
+    }
+    return false;
+  }
+
   void SetSelected(EditorDocument* doc, uint64_t id)
   {
     if (!doc)
