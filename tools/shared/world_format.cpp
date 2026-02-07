@@ -94,7 +94,9 @@ namespace sc_world
     if (!file.instances.empty())
     {
       const uint32_t count = static_cast<uint32_t>(file.instances.size());
-      const uint32_t recordSize = sizeof(uint64_t) + sizeof(AssetId) + sizeof(AssetId) + sizeof(Transform) + sizeof(uint32_t);
+      const uint32_t baseRecordSize = sizeof(uint64_t) + sizeof(AssetId) + sizeof(AssetId) + sizeof(Transform) + sizeof(uint32_t);
+      const bool writeName = (file.version >= 2);
+      const uint32_t recordSize = baseRecordSize + (writeName ? kInstanceNameMax : 0u);
       const uint32_t chunkSize = sizeof(uint32_t) + count * recordSize;
       WriteChunkHeader(out, kInstId, chunkSize);
       WriteValue(out, count);
@@ -104,6 +106,8 @@ namespace sc_world
         WriteValue(out, inst.mesh_id);
         WriteValue(out, inst.material_id);
         WriteValue(out, inst.transform);
+        if (writeName)
+          out.write(inst.name, static_cast<std::streamsize>(kInstanceNameMax));
         WriteValue(out, inst.tags);
       }
     }
@@ -207,6 +211,16 @@ namespace sc_world
         uint32_t count = 0;
         ReadValue(in, count);
         out_file->instances.resize(count);
+
+        const uint32_t baseRecordSize = sizeof(uint64_t) + sizeof(AssetId) + sizeof(AssetId) + sizeof(Transform) + sizeof(uint32_t);
+        uint32_t recordSize = baseRecordSize;
+        if (count > 0 && ch.size >= sizeof(uint32_t))
+          recordSize = (ch.size - sizeof(uint32_t)) / count;
+
+        const uint32_t nameRecordSize = baseRecordSize + kInstanceNameMax;
+        const bool hasName = (recordSize >= nameRecordSize);
+        const uint32_t expectedSize = hasName ? nameRecordSize : baseRecordSize;
+
         for (uint32_t i = 0; i < count; ++i)
         {
           Instance inst{};
@@ -214,7 +228,23 @@ namespace sc_world
           ReadValue(in, inst.mesh_id);
           ReadValue(in, inst.material_id);
           ReadValue(in, inst.transform);
+          if (hasName)
+          {
+            in.read(inst.name, static_cast<std::streamsize>(kInstanceNameMax));
+            inst.name[kInstanceNameMax - 1] = '\0';
+          }
+          else
+          {
+            inst.name[0] = '\0';
+          }
           ReadValue(in, inst.tags);
+
+          if (recordSize > expectedSize)
+          {
+            const uint32_t remaining = recordSize - expectedSize;
+            in.seekg(static_cast<std::streamoff>(remaining), std::ios::cur);
+          }
+
           out_file->instances[i] = inst;
         }
       }

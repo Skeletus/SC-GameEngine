@@ -578,7 +578,10 @@ namespace editor
       e.id = inst.id;
       e.meshAssetId = inst.mesh_id;
       e.materialAssetId = inst.material_id;
-      std::snprintf(e.name, sizeof(e.name), "Inst_%llu", (unsigned long long)inst.id);
+      if (inst.name[0] != '\0')
+        std::snprintf(e.name, sizeof(e.name), "%s", inst.name);
+      else
+        std::snprintf(e.name, sizeof(e.name), "Inst_%llu", (unsigned long long)inst.id);
       e.transform.position[0] = inst.transform.position[0];
       e.transform.position[1] = inst.transform.position[1];
       e.transform.position[2] = inst.transform.position[2];
@@ -612,6 +615,7 @@ namespace editor
       inst.id = e.id;
       inst.mesh_id = e.meshAssetId;
       inst.material_id = e.materialAssetId;
+      std::snprintf(inst.name, sizeof(inst.name), "%s", e.name);
       inst.tags = e.tags;
       inst.transform.position[0] = e.transform.position[0];
       inst.transform.position[1] = e.transform.position[1];

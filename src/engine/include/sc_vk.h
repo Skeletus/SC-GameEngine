@@ -65,6 +65,7 @@ namespace sc
     void setTelemetry(const JobsTelemetrySnapshot& jobs, const MemStats& mem);
     void setEcsStats(const EcsStatsSnapshot& ecs, const SchedulerStatsSnapshot& sched);
     void setRenderFrame(const RenderFrameData* frame) { m_renderFrame = frame; }
+    void setSceneViewport(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
     void setDebugWorld(World* world, Entity camera, Entity triangle, Entity cube, Entity root);
     void setWorldStreamingContext(WorldStreamingState* streaming,
                                   CullingState* culling,
@@ -173,6 +174,8 @@ namespace sc
     uint32_t m_imageIndex = 0; // swapchain image index actual
 
     bool m_swapchainDirty = false; // marcado por resize o out-of-date
+    VkRect2D m_sceneViewport{};
+    bool m_hasSceneViewport = false;
 
     DebugUI m_debugUI{};
     JobsTelemetrySnapshot m_jobsSnap{};

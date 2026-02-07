@@ -26,7 +26,10 @@ using sc::editor::CommandStack;
 using sc::editor::CmdDeleteEntity;
 using sc::editor::CmdPlaceEntity;
 using sc::editor::CmdTransformEntity;
+using sc::editor::CmdSetProperty;
 using sc::editor::GizmoState;
+
+static constexpr float kEditorViewportAspect = 16.0f / 9.0f;
 
 static std::string ResolveBasePath()
 {
@@ -68,6 +71,8 @@ struct ViewportPanelState
 {
   ImVec2 pos{};
   ImVec2 size{};
+  ImVec2 render_pos{};
+  ImVec2 render_size{};
   bool hovered = false;
   bool clicked = false;
 };
@@ -80,6 +85,99 @@ static void FormatEntityLabel(const EditorEntity& e, char* out, size_t out_size)
     std::snprintf(out, out_size, "%s", e.name);
   else
     std::snprintf(out, out_size, "Entity %llu", (unsigned long long)e.id);
+}
+
+static float DegToRad(float deg)
+{
+  return deg * 0.0174532925f;
+}
+
+static float RadToDeg(float rad)
+{
+  return rad * 57.2957795f;
+}
+
+static bool MeshBoundsValid(const ScRenderMeshInfo& info)
+{
+  const float dx = std::fabs(info.bounds_max[0] - info.bounds_min[0]);
+  const float dy = std::fabs(info.bounds_max[1] - info.bounds_min[1]);
+  const float dz = std::fabs(info.bounds_max[2] - info.bounds_min[2]);
+  return (dx > 1e-4f) || (dy > 1e-4f) || (dz > 1e-4f);
+}
+
+static void GetEntityWorldAabb(const EditorEntity& e, float out_min[3], float out_max[3])
+{
+  float local_min[3] = { -0.5f, -0.5f, -0.5f };
+  float local_max[3] = { 0.5f, 0.5f, 0.5f };
+
+  if (e.meshHandle != 0 && MeshBoundsValid(e.meshInfo))
+  {
+    local_min[0] = e.meshInfo.bounds_min[0];
+    local_min[1] = e.meshInfo.bounds_min[1];
+    local_min[2] = e.meshInfo.bounds_min[2];
+    local_max[0] = e.meshInfo.bounds_max[0];
+    local_max[1] = e.meshInfo.bounds_max[1];
+    local_max[2] = e.meshInfo.bounds_max[2];
+  }
+
+  float minx = local_min[0] * e.transform.scale[0];
+  float miny = local_min[1] * e.transform.scale[1];
+  float minz = local_min[2] * e.transform.scale[2];
+  float maxx = local_max[0] * e.transform.scale[0];
+  float maxy = local_max[1] * e.transform.scale[1];
+  float maxz = local_max[2] * e.transform.scale[2];
+
+  if (minx > maxx) std::swap(minx, maxx);
+  if (miny > maxy) std::swap(miny, maxy);
+  if (minz > maxz) std::swap(minz, maxz);
+
+  out_min[0] = minx + e.transform.position[0];
+  out_min[1] = miny + e.transform.position[1];
+  out_min[2] = minz + e.transform.position[2];
+  out_max[0] = maxx + e.transform.position[0];
+  out_max[1] = maxy + e.transform.position[1];
+  out_max[2] = maxz + e.transform.position[2];
+}
+
+static bool TransformDifferent(const EditorTransform& a, const EditorTransform& b)
+{
+  auto diff = [](float x, float y) { return std::fabs(x - y) > 1e-4f; };
+  for (int i = 0; i < 3; ++i)
+  {
+    if (diff(a.position[i], b.position[i]) ||
+        diff(a.rotation[i], b.rotation[i]) ||
+        diff(a.scale[i], b.scale[i]))
+      return true;
+  }
+  return false;
+}
+
+static void FocusCameraOnEntity(EditorCamera* cam, const EditorEntity& e)
+{
+  if (!cam)
+    return;
+  float bmin[3]{};
+  float bmax[3]{};
+  GetEntityWorldAabb(e, bmin, bmax);
+  float center[3] = {
+    (bmin[0] + bmax[0]) * 0.5f,
+    (bmin[1] + bmax[1]) * 0.5f,
+    (bmin[2] + bmax[2]) * 0.5f
+  };
+  float ext[3] = {
+    (bmax[0] - bmin[0]) * 0.5f,
+    (bmax[1] - bmin[1]) * 0.5f,
+    (bmax[2] - bmin[2]) * 0.5f
+  };
+  float radius = std::sqrt(ext[0] * ext[0] + ext[1] * ext[1] + ext[2] * ext[2]);
+  radius = std::max(radius, 0.25f);
+
+  float forward[3]{};
+  sc::editor::CameraForward(cam, forward);
+  const float dist = radius * 2.5f + 2.0f;
+  cam->position[0] = center[0] - forward[0] * dist;
+  cam->position[1] = center[1] - forward[1] * dist;
+  cam->position[2] = center[2] - forward[2] * dist;
 }
 
 static void drawHierarchyPanel(EditorDocument* doc,
@@ -153,7 +251,7 @@ static void drawHierarchyPanel(EditorDocument* doc,
   ImGui::End();
 }
 
-static ViewportPanelState drawViewportPanel()
+static ViewportPanelState drawViewportPanel(float target_aspect)
 {
   ViewportPanelState state{};
   ImGui::Begin("Viewport", nullptr,
@@ -165,8 +263,43 @@ static ViewportPanelState drawViewportPanel()
   if (state.size.x < 1.0f) state.size.x = 1.0f;
   if (state.size.y < 1.0f) state.size.y = 1.0f;
   ImGui::InvisibleButton("viewport_capture", state.size);
-  state.hovered = ImGui::IsItemHovered();
-  state.clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+
+  const ImVec2 panel_min = state.pos;
+  const ImVec2 panel_max = ImVec2(state.pos.x + state.size.x, state.pos.y + state.size.y);
+  const float panel_aspect = state.size.x / state.size.y;
+  state.render_size = state.size;
+  if (panel_aspect > target_aspect)
+  {
+    state.render_size.x = state.size.y * target_aspect;
+  }
+  else
+  {
+    state.render_size.y = state.size.x / target_aspect;
+  }
+  if (state.render_size.x < 1.0f) state.render_size.x = 1.0f;
+  if (state.render_size.y < 1.0f) state.render_size.y = 1.0f;
+  state.render_pos = ImVec2(
+    state.pos.x + (state.size.x - state.render_size.x) * 0.5f,
+    state.pos.y + (state.size.y - state.render_size.y) * 0.5f);
+  const ImVec2 render_max = ImVec2(state.render_pos.x + state.render_size.x,
+                                   state.render_pos.y + state.render_size.y);
+
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+  const ImU32 bar_color = ImGui::GetColorU32(ImVec4(0.02f, 0.02f, 0.05f, 1.0f));
+  if (state.render_pos.y > panel_min.y)
+    draw_list->AddRectFilled(panel_min, ImVec2(panel_max.x, state.render_pos.y), bar_color);
+  if (render_max.y < panel_max.y)
+    draw_list->AddRectFilled(ImVec2(panel_min.x, render_max.y), panel_max, bar_color);
+  if (state.render_pos.x > panel_min.x)
+    draw_list->AddRectFilled(panel_min, ImVec2(state.render_pos.x, panel_max.y), bar_color);
+  if (render_max.x < panel_max.x)
+    draw_list->AddRectFilled(ImVec2(render_max.x, panel_min.y), panel_max, bar_color);
+
+  const bool panel_hovered = ImGui::IsItemHovered();
+  const bool render_hovered = panel_hovered &&
+                              ImGui::IsMouseHoveringRect(state.render_pos, render_max, true);
+  state.hovered = render_hovered;
+  state.clicked = render_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
   ImGui::End();
   return state;
 }
@@ -179,13 +312,15 @@ static uint64_t pickEntityFromMouse(const EditorDocument* doc,
 {
   if (!doc || !cam)
     return 0;
+  if (!viewport.hovered)
+    return 0;
   sc::editor::Ray ray = sc::editor::computePickRay(cam,
                                                    mouse_x,
                                                    mouse_y,
-                                                   viewport.pos.x,
-                                                   viewport.pos.y,
-                                                   viewport.size.x,
-                                                   viewport.size.y);
+                                                   viewport.render_pos.x,
+                                                   viewport.render_pos.y,
+                                                   viewport.render_size.x,
+                                                   viewport.render_size.y);
   return sc::editor::PickEntity(doc, ray);
 }
 
@@ -466,30 +601,267 @@ int main(int argc, char** argv)
     ImGui::End();
 
     ImGui::Begin("Inspector");
-    if (doc.selectedId != 0)
+
+    static uint64_t name_buffer_id = 0;
+    static uint64_t name_edit_id = 0;
+    static char name_buf[64] = {};
+    static char name_before[64] = {};
+    static bool name_editing = false;
+
+    static uint64_t transform_edit_id = 0;
+    static EditorTransform transform_before{};
+    static bool transform_editing = false;
+
+    static bool asset_cache_ready = false;
+    static std::vector<const sc_world::AssetRegistryEntry*> asset_entries;
+    static std::vector<const char*> asset_labels;
+
+    auto commit_name = [&](uint64_t entity_id)
     {
-      EditorEntity* selected = sc::editor::FindEntity(&doc, doc.selectedId);
-      if (selected)
-      {
-        if (selected->name[0] != '\0')
-          ImGui::Text("Selected: %s (id %llu)", selected->name, (unsigned long long)selected->id);
-        else
-          ImGui::Text("Selected: Entity %llu", (unsigned long long)selected->id);
-        ImGui::Separator();
-        ImGui::DragFloat3("Position", selected->transform.position, 0.1f);
-      }
-      else
-      {
-        ImGui::TextUnformatted("Selected: <missing>");
-      }
+      if (entity_id == 0)
+        return;
+      if (std::strcmp(name_before, name_buf) == 0)
+        return;
+      if (!sc::editor::FindEntity(&doc, entity_id))
+        return;
+      auto cmd = std::make_unique<CmdSetProperty>();
+      cmd->type = CmdSetProperty::Name;
+      cmd->entityId = entity_id;
+      std::snprintf(cmd->oldName, sizeof(cmd->oldName), "%s", name_before);
+      std::snprintf(cmd->newName, sizeof(cmd->newName), "%s", name_buf);
+      cmd_stack.execute(std::move(cmd), &doc);
+    };
+
+    auto commit_transform = [&](uint64_t entity_id)
+    {
+      if (entity_id == 0)
+        return;
+      EditorEntity* e = sc::editor::FindEntity(&doc, entity_id);
+      if (!e)
+        return;
+      if (!TransformDifferent(transform_before, e->transform))
+        return;
+      auto cmd = std::make_unique<CmdTransformEntity>();
+      cmd->entityId = entity_id;
+      cmd->before = transform_before;
+      cmd->after = e->transform;
+      cmd_stack.execute(std::move(cmd), &doc);
+    };
+
+    EditorEntity* selected = (doc.selectedId != 0) ? sc::editor::FindEntity(&doc, doc.selectedId) : nullptr;
+
+    if (name_editing && (!selected || selected->id != name_edit_id))
+    {
+      commit_name(name_edit_id);
+      name_editing = false;
+    }
+
+    if (transform_editing && (!selected || selected->id != transform_edit_id))
+    {
+      commit_transform(transform_edit_id);
+      transform_editing = false;
+    }
+
+    if (!selected)
+    {
+      ImGui::TextUnformatted("No selection");
     }
     else
     {
-      ImGui::TextUnformatted("Selected: none");
+      if (ImGui::CollapsingHeader("General", ImGuiTreeNodeFlags_DefaultOpen))
+      {
+        ImGui::Text("ID: %llu", (unsigned long long)selected->id);
+
+        if (!name_editing)
+        {
+          if (name_buffer_id != selected->id)
+          {
+            name_buffer_id = selected->id;
+            std::snprintf(name_buf, sizeof(name_buf), "%s", selected->name);
+          }
+          else if (std::strcmp(name_buf, selected->name) != 0)
+          {
+            std::snprintf(name_buf, sizeof(name_buf), "%s", selected->name);
+          }
+        }
+
+        ImGui::InputText("Name", name_buf, sizeof(name_buf));
+        const bool name_active = ImGui::IsItemActive();
+        if (name_active && !name_editing)
+        {
+          name_editing = true;
+          name_edit_id = name_buffer_id;
+          if (EditorEntity* e = sc::editor::FindEntity(&doc, name_edit_id))
+            std::snprintf(name_before, sizeof(name_before), "%s", e->name);
+          else
+            name_before[0] = '\0';
+        }
+
+        if (name_editing)
+        {
+          if (EditorEntity* e = sc::editor::FindEntity(&doc, name_edit_id))
+          {
+            if (std::strcmp(e->name, name_buf) != 0)
+              std::snprintf(e->name, sizeof(e->name), "%s", name_buf);
+          }
+        }
+
+        if (!name_active && name_editing)
+        {
+          commit_name(name_edit_id);
+          name_editing = false;
+          name_buffer_id = name_edit_id;
+        }
+      }
+
+      if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))
+      {
+        EditorTransform pre = selected->transform;
+        ImGui::DragFloat3("Position", selected->transform.position, 0.1f);
+        if (ImGui::IsItemActivated())
+        {
+          transform_editing = true;
+          transform_edit_id = selected->id;
+          transform_before = pre;
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit())
+        {
+          commit_transform(selected->id);
+          transform_editing = false;
+        }
+
+        pre = selected->transform;
+        float rot_deg[3] = {
+          RadToDeg(pre.rotation[0]),
+          RadToDeg(pre.rotation[1]),
+          RadToDeg(pre.rotation[2])
+        };
+        if (ImGui::DragFloat3("Rotation (deg)", rot_deg, 1.0f))
+        {
+          selected->transform.rotation[0] = DegToRad(rot_deg[0]);
+          selected->transform.rotation[1] = DegToRad(rot_deg[1]);
+          selected->transform.rotation[2] = DegToRad(rot_deg[2]);
+        }
+        if (ImGui::IsItemActivated())
+        {
+          transform_editing = true;
+          transform_edit_id = selected->id;
+          transform_before = pre;
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit())
+        {
+          commit_transform(selected->id);
+          transform_editing = false;
+        }
+
+        pre = selected->transform;
+        ImGui::DragFloat3("Scale", selected->transform.scale, 0.05f);
+        if (ImGui::IsItemActivated())
+        {
+          transform_editing = true;
+          transform_edit_id = selected->id;
+          transform_before = pre;
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit())
+        {
+          commit_transform(selected->id);
+          transform_editing = false;
+        }
+      }
+
+      if (ImGui::CollapsingHeader("Render", ImGuiTreeNodeFlags_DefaultOpen))
+      {
+        const sc_world::AssetRegistryEntry* current =
+          registry.findByIds(selected->meshAssetId, selected->materialAssetId);
+        ImGui::Text("Mesh: %s", current ? current->mesh_path.c_str() : "<missing>");
+        ImGui::Text("Material: %s", current ? current->material_path.c_str() : "<missing>");
+
+        if (!asset_cache_ready || asset_entries.size() != registry.entries.size())
+        {
+          asset_entries.clear();
+          asset_labels.clear();
+          asset_entries.reserve(registry.entries.size());
+          asset_labels.reserve(registry.entries.size());
+          for (const auto& entry : registry.entries)
+          {
+            asset_entries.push_back(&entry);
+            asset_labels.push_back(entry.label.c_str());
+          }
+          asset_cache_ready = true;
+        }
+
+        if (!asset_entries.empty())
+        {
+          const char* preview = current ? current->label.c_str() : "<missing>";
+          if (ImGui::BeginCombo("Asset", preview))
+          {
+            for (size_t i = 0; i < asset_entries.size(); ++i)
+            {
+              const bool is_selected = (current == asset_entries[i]);
+              if (ImGui::Selectable(asset_labels[i], is_selected))
+              {
+                const auto* entry = asset_entries[i];
+                if (entry && (selected->meshAssetId != entry->mesh_id ||
+                              selected->materialAssetId != entry->material_id))
+                {
+                  selected->meshAssetId = entry->mesh_id;
+                  selected->materialAssetId = entry->material_id;
+                  sc::editor::ResolveEntityAssets(selected, render_ctx, registry);
+                }
+              }
+              if (is_selected)
+                ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+          }
+        }
+        else
+        {
+          ImGui::TextDisabled("No render assets loaded.");
+        }
+      }
+
+      if (ImGui::CollapsingHeader("Actions", ImGuiTreeNodeFlags_DefaultOpen))
+      {
+        if (ImGui::Button("Delete"))
+        {
+          EditorEntity removed{};
+          if (sc::editor::RemoveEntity(&doc, selected->id, &removed))
+          {
+            auto cmd = std::make_unique<CmdDeleteEntity>();
+            cmd->entity = removed;
+            cmd_stack.execute(std::move(cmd), &doc);
+          }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Duplicate"))
+        {
+          EditorEntity copy = *selected;
+          copy.id = doc.nextId++;
+          const float offset = (doc.snapToGrid && doc.gridSize > 0.0f) ? doc.gridSize : 1.0f;
+          copy.transform.position[0] += offset;
+          copy.transform.position[2] += offset;
+          if (doc.snapToGrid)
+            sc::editor::SnapTransform(&copy.transform, doc.gridSize);
+          if (copy.name[0] != '\0')
+            std::snprintf(copy.name, sizeof(copy.name), "%s Copy", selected->name);
+          else
+            std::snprintf(copy.name, sizeof(copy.name), "Entity %llu Copy", (unsigned long long)selected->id);
+
+          auto cmd = std::make_unique<CmdPlaceEntity>();
+          cmd->entity = copy;
+          cmd_stack.execute(std::move(cmd), &doc);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Focus"))
+        {
+          FocusCameraOnEntity(&camera, *selected);
+        }
+      }
     }
     ImGui::End();
 
-    ViewportPanelState viewport = drawViewportPanel();
+    ViewportPanelState viewport = drawViewportPanel(kEditorViewportAspect);
 
     const bool ctrl = ImGui::GetIO().KeyCtrl;
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z))
@@ -515,7 +887,8 @@ int main(int argc, char** argv)
         bool dragging = (mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
         sc::editor::GizmoTranslate(&gizmo, sel, &camera,
           static_cast<float>(mx), static_cast<float>(my),
-          viewport.pos.x, viewport.pos.y, viewport.size.x, viewport.size.y,
+          viewport.render_pos.x, viewport.render_pos.y,
+          viewport.render_size.x, viewport.render_size.y,
           left_mouse_down, dragging, left_mouse_released,
           doc.snapToGrid, doc.gridSize);
 
@@ -562,8 +935,8 @@ int main(int argc, char** argv)
     sc::editor::BuildDrawItems(&doc, &draw_items);
     sc::editor::BuildDebugLines(&doc, &debug_lines);
 
-    const float vp_w = std::max(1.0f, viewport.size.x);
-    const float vp_h = std::max(1.0f, viewport.size.y);
+    const float vp_w = std::max(1.0f, viewport.render_size.x);
+    const float vp_h = std::max(1.0f, viewport.render_size.y);
     const sc::Mat4 view = sc::editor::CameraView(&camera);
     const sc::Mat4 proj = sc::editor::CameraProj(&camera, vp_w / vp_h);
 
@@ -574,6 +947,16 @@ int main(int argc, char** argv)
     frame.camera_pos[1] = camera.position[1];
     frame.camera_pos[2] = camera.position[2];
     frame.time_sec = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+    const ImVec2 fb_scale = ImGui::GetIO().DisplayFramebufferScale;
+    auto to_u32 = [](float v)
+    {
+      const float clamped = (v < 0.0f) ? 0.0f : v;
+      return static_cast<uint32_t>(std::lround(clamped));
+    };
+    frame.viewport_x = to_u32(viewport.render_pos.x * fb_scale.x);
+    frame.viewport_y = to_u32(viewport.render_pos.y * fb_scale.y);
+    frame.viewport_w = std::max(1u, to_u32(viewport.render_size.x * fb_scale.x));
+    frame.viewport_h = std::max(1u, to_u32(viewport.render_size.y * fb_scale.y));
 
     scRenderBeginFrame(render_ctx, &frame);
 

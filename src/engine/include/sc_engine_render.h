@@ -42,6 +42,10 @@ typedef struct ScRenderFrameDesc
   float proj[16];
   float camera_pos[3];
   float time_sec;
+  uint32_t viewport_x;
+  uint32_t viewport_y;
+  uint32_t viewport_w;
+  uint32_t viewport_h;
 } ScRenderFrameDesc;
 
 typedef struct ScRenderDrawItem

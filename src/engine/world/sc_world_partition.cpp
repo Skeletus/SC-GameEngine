@@ -707,7 +707,10 @@ namespace sc
     for (const sc_world::Instance& inst : file.instances)
     {
       SpawnRecord rec{};
-      std::snprintf(rec.name, Name::kMax, "Inst_%llu", (unsigned long long)inst.id);
+      if (inst.name[0] != '\0')
+        std::snprintf(rec.name, Name::kMax, "%s", inst.name);
+      else
+        std::snprintf(rec.name, Name::kMax, "Inst_%llu", (unsigned long long)inst.id);
       rec.position[0] = inst.transform.position[0];
       rec.position[1] = inst.transform.position[1];
       rec.position[2] = inst.transform.position[2];

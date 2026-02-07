@@ -10,7 +10,8 @@ namespace sc_world
   static constexpr uint32_t kWorldMagic = 0x444C5257;  // "WRLD"
   static constexpr uint32_t kSectorMagic = 0x54434553; // "SECT"
   static constexpr uint32_t kWorldVersion = 1;
-  static constexpr uint32_t kSectorVersion = 1;
+  static constexpr uint32_t kSectorVersion = 2;
+  static constexpr uint32_t kInstanceNameMax = 64;
 
   struct SectorCoord
   {
@@ -34,6 +35,7 @@ namespace sc_world
     AssetId mesh_id = 0;
     AssetId material_id = 0;
     Transform transform{};
+    char name[kInstanceNameMax] = "";
     uint32_t tags = 0;
   };
 

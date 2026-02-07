@@ -1448,6 +1448,18 @@ namespace sc
     m_schedSnap = sched;
   }
 
+  void VkRenderer::setSceneViewport(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+  {
+    if (w == 0 || h == 0)
+    {
+      m_hasSceneViewport = false;
+      return;
+    }
+    m_hasSceneViewport = true;
+    m_sceneViewport.offset = { static_cast<int32_t>(x), static_cast<int32_t>(y) };
+    m_sceneViewport.extent = { w, h };
+  }
+
   void VkRenderer::setDebugWorld(World* world, Entity camera, Entity triangle, Entity cube, Entity root)
   {
     m_debugUI.setWorldContext(world, camera, triangle, cube, root);
@@ -1647,18 +1659,44 @@ namespace sc
 
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
+    VkRect2D sceneRect{};
+    if (m_hasSceneViewport)
+    {
+      sceneRect = m_sceneViewport;
+      if (sceneRect.offset.x < 0) sceneRect.offset.x = 0;
+      if (sceneRect.offset.y < 0) sceneRect.offset.y = 0;
+      const uint32_t maxW = (sceneRect.offset.x < static_cast<int32_t>(m_swapchainExtent.width))
+        ? (m_swapchainExtent.width - static_cast<uint32_t>(sceneRect.offset.x))
+        : 0u;
+      const uint32_t maxH = (sceneRect.offset.y < static_cast<int32_t>(m_swapchainExtent.height))
+        ? (m_swapchainExtent.height - static_cast<uint32_t>(sceneRect.offset.y))
+        : 0u;
+      sceneRect.extent.width = std::min(sceneRect.extent.width, maxW);
+      sceneRect.extent.height = std::min(sceneRect.extent.height, maxH);
+      if (sceneRect.extent.width == 0 || sceneRect.extent.height == 0)
+      {
+        sceneRect.offset = { 0, 0 };
+        sceneRect.extent = m_swapchainExtent;
+      }
+    }
+    else
+    {
+      sceneRect.offset = { 0, 0 };
+      sceneRect.extent = m_swapchainExtent;
+    }
+
     VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = (float)m_swapchainExtent.width;
-    viewport.height = (float)m_swapchainExtent.height;
+    viewport.x = static_cast<float>(sceneRect.offset.x);
+    viewport.y = static_cast<float>(sceneRect.offset.y);
+    viewport.width = static_cast<float>(sceneRect.extent.width);
+    viewport.height = static_cast<float>(sceneRect.extent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
 
     VkRect2D scissor{};
-    scissor.offset = { 0, 0 };
-    scissor.extent = m_swapchainExtent;
+    scissor.offset = sceneRect.offset;
+    scissor.extent = sceneRect.extent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     if (m_renderFrame && m_cameraMapped[m_frameIndex])

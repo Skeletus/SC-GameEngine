@@ -160,19 +160,19 @@ If a system does not scale to **thousands of entities**, it does not belong.
 * Docking layout (Unity-style)
 * Viewport / Hierarchy / Inspector / Project / Toolbar
 
-#### E2 — Selection & Hierarchy (IN PROGRESS)
+#### E2 — Selection & Hierarchy (COMPLETED)
 
 * Viewport picking
 * Hierarchy selection
 * Visual highlight
 
-#### E3 — Inspector
+#### E3 — Inspector (COMPLETED)
 
 * Transform editing
 * Mesh / material assignment
 * Delete / duplicate / focus
 
-#### E4 — Gizmos
+#### E4 — Gizmos (IN PROGRESS)
 
 * Move / Rotate / Scale
 * Undo / Redo

@@ -138,6 +138,10 @@ void scRenderBeginFrame(ScRenderContext* ctx, const ScRenderFrameDesc* frame)
   ctx->debugDraw.clear();
   ctx->frameDesc = *frame;
   ctx->hasFrameDesc = true;
+  ctx->renderer.setSceneViewport(frame->viewport_x,
+                                 frame->viewport_y,
+                                 frame->viewport_w,
+                                 frame->viewport_h);
 }
 
 void scRenderSubmit(ScRenderContext* ctx, const ScRenderDrawList* list)
