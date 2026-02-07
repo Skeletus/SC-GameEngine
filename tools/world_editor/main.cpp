@@ -1,5 +1,6 @@
 #include <SDL.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <backends/imgui_impl_sdl2.h>
 
 #include "sc_engine_render.h"
@@ -109,6 +110,8 @@ int main(int argc, char** argv)
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
+  ImGuiIO& io = ImGui::GetIO();
+  io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
   ImGui::StyleColorsDark();
   ImGui_ImplSDL2_InitForVulkan(window);
   scRenderImGuiInit(render_ctx);
@@ -238,10 +241,74 @@ int main(int argc, char** argv)
     scRenderImGuiNewFrame(render_ctx);
     ImGui::NewFrame();
 
+    ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(main_viewport->Pos);
+    ImGui::SetNextWindowSize(main_viewport->Size);
+    ImGui::SetNextWindowViewport(main_viewport->ID);
+    ImGuiWindowFlags host_window_flags =
+      ImGuiWindowFlags_NoDocking |
+      ImGuiWindowFlags_NoTitleBar |
+      ImGuiWindowFlags_NoCollapse |
+      ImGuiWindowFlags_NoResize |
+      ImGuiWindowFlags_NoMove |
+      ImGuiWindowFlags_NoBringToFrontOnFocus |
+      ImGuiWindowFlags_NoNavFocus |
+      ImGuiWindowFlags_NoBackground |
+      ImGuiWindowFlags_NoScrollbar |
+      ImGuiWindowFlags_NoScrollWithMouse;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::Begin("DockSpaceHost", nullptr, host_window_flags);
+    ImGui::PopStyleVar(3);
+
+    ImGuiDockNodeFlags dockspace_flags = ImGuiDockNodeFlags_PassthruCentralNode;
+    ImGuiID dockspace_id = ImGui::GetID("DockSpace");
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), dockspace_flags);
+
+    static bool dockspace_built = false;
+    if (!dockspace_built)
+    {
+      ImGui::DockBuilderRemoveNode(dockspace_id);
+      ImGui::DockBuilderAddNode(dockspace_id, dockspace_flags | ImGuiDockNodeFlags_DockSpace);
+      ImGui::DockBuilderSetNodeSize(dockspace_id, main_viewport->Size);
+
+      ImGuiID dock_main_id = dockspace_id;
+      const float left_ratio = 0.20f;
+      const float right_ratio = 0.25f;
+      const float bottom_ratio = 0.25f;
+      const float top_ratio = 0.08f;
+      const float remaining_after_sides = 1.0f - left_ratio - right_ratio;
+      const float remaining_after_bottom = remaining_after_sides - bottom_ratio;
+
+      ImGuiID dock_id_left = ImGui::DockBuilderSplitNode(
+        dock_main_id, ImGuiDir_Left, left_ratio, nullptr, &dock_main_id);
+      ImGuiID dock_id_right = ImGui::DockBuilderSplitNode(
+        dock_main_id, ImGuiDir_Right, right_ratio / (1.0f - left_ratio), nullptr, &dock_main_id);
+      ImGuiID dock_id_down = ImGui::DockBuilderSplitNode(
+        dock_main_id, ImGuiDir_Down, bottom_ratio / remaining_after_sides, nullptr, &dock_main_id);
+      ImGuiID dock_id_up = ImGui::DockBuilderSplitNode(
+        dock_main_id, ImGuiDir_Up, top_ratio / remaining_after_bottom, nullptr, &dock_main_id);
+
+      ImGui::DockBuilderDockWindow("Hierarchy", dock_id_left);
+      ImGui::DockBuilderDockWindow("Inspector", dock_id_right);
+      ImGui::DockBuilderDockWindow("Palette", dock_id_down);
+      ImGui::DockBuilderDockWindow("Toolbar", dock_id_up);
+      ImGui::DockBuilderDockWindow("Viewport", dock_main_id);
+      ImGui::DockBuilderFinish(dockspace_id);
+      dockspace_built = true;
+    }
+    ImGui::End();
+
     const int32_t cam_sector_x = static_cast<int32_t>(std::floor(camera.position[0] / doc.sectorSize));
     const int32_t cam_sector_z = static_cast<int32_t>(std::floor(camera.position[2] / doc.sectorSize));
 
-    ImGui::Begin("World");
+    ImGui::Begin("Toolbar");
+    ImGui::TextUnformatted("Toolbar (placeholder)");
+    ImGui::End();
+
+    ImGui::Begin("Hierarchy");
     ImGui::Text("Camera Sector: %d, %d", cam_sector_x, cam_sector_z);
     ImGui::Checkbox("Snap To Grid", &doc.snapToGrid);
     ImGui::DragFloat("Grid Size", &doc.gridSize, 0.1f, 0.1f, 10.0f);
@@ -319,7 +386,10 @@ int main(int argc, char** argv)
     }
     ImGui::End();
 
-    ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::Begin("Viewport", nullptr,
+      ImGuiWindowFlags_NoScrollbar |
+      ImGuiWindowFlags_NoScrollWithMouse |
+      ImGuiWindowFlags_NoBackground);
     ImVec2 vp_pos = ImGui::GetWindowPos();
     ImVec2 vp_size = ImGui::GetContentRegionAvail();
     if (vp_size.x < 1.0f) vp_size.x = 1.0f;
