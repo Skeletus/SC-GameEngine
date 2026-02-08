@@ -211,6 +211,111 @@ namespace editor
     return it->second;
   }
 
+  void EditorTextureCache::clear()
+  {
+    m_records.clear();
+  }
+
+  const TextureRecord* EditorTextureCache::find(sc_world::AssetId id) const
+  {
+    auto it = m_records.find(id);
+    if (it == m_records.end())
+      return nullptr;
+    return &it->second;
+  }
+
+  TextureRecord* EditorTextureCache::findMutable(sc_world::AssetId id)
+  {
+    auto it = m_records.find(id);
+    if (it == m_records.end())
+      return nullptr;
+    return &it->second;
+  }
+
+  bool EditorTextureCache::updateRecord(ScRenderContext* render, TextureRecord& record)
+  {
+    if (!render || record.handle == 0)
+      return false;
+
+    ScRenderTextureInfo info{};
+    if (!scRenderGetTextureInfo(render, record.handle, &info))
+      return false;
+
+    record.width = info.width;
+    record.height = info.height;
+    record.format = info.format;
+    record.srgb = info.srgb != 0;
+    record.cpuBytes = info.cpu_bytes;
+    record.gpuBytes = info.gpu_bytes;
+    record.resident = info.resident != 0;
+    record.fromDisk = info.from_disk != 0;
+    return true;
+  }
+
+  const TextureRecord* EditorTextureCache::request(ScRenderContext* render,
+                                                   const AssetDatabase& db,
+                                                   sc_world::AssetId id)
+  {
+    if (!render || id == 0)
+      return nullptr;
+
+    const AssetEntry* entry = db.findById(id);
+    if (!entry || entry->type != AssetType::Texture)
+      return nullptr;
+
+    TextureRecord& record = m_records[id];
+    if (record.id == 0)
+      record.id = id;
+
+    if (record.handle == 0)
+    {
+      record.handle = scRenderLoadTexture(render, entry->relPath.c_str());
+      record.fileModifiedTime = entry->lastWriteTime;
+    }
+
+    updateRecord(render, record);
+    return (record.handle != 0) ? &record : nullptr;
+  }
+
+  bool EditorTextureCache::reload(ScRenderContext* render,
+                                  const AssetDatabase& db,
+                                  sc_world::AssetId id)
+  {
+    if (!render || id == 0)
+      return false;
+
+    const AssetEntry* entry = db.findById(id);
+    if (!entry || entry->type != AssetType::Texture)
+      return false;
+
+    TextureRecord* record = findMutable(id);
+    if (!record)
+    {
+      record = &m_records[id];
+      record->id = id;
+      record->handle = scRenderLoadTexture(render, entry->relPath.c_str());
+      record->fileModifiedTime = entry->lastWriteTime;
+    }
+
+    if (record->handle == 0)
+      return false;
+
+    if (!scRenderReloadTexture(render, record->handle))
+      return false;
+
+    record->fileModifiedTime = entry->lastWriteTime;
+    updateRecord(render, *record);
+    return true;
+  }
+
+  ScRenderHandle EditorTextureCache::resolveTextureHandle(ScRenderContext* render,
+                                                          const AssetDatabase& db,
+                                                          sc_world::AssetId id)
+  {
+    const TextureRecord* record = request(render, db, id);
+    return record ? record->handle : 0;
+  }
+
   void AssetDatabase::addFolder(const std::filesystem::path& absPath)
   {
     if (m_root.empty())

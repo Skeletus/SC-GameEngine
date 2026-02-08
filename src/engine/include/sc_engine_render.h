@@ -68,6 +68,25 @@ typedef struct ScRenderMeshInfo
   float bounds_max[3];
 } ScRenderMeshInfo;
 
+typedef enum ScRenderTextureFormat
+{
+  SC_RENDER_TEXTURE_FORMAT_UNKNOWN = 0,
+  SC_RENDER_TEXTURE_FORMAT_RGBA8_SRGB = 1,
+  SC_RENDER_TEXTURE_FORMAT_RGBA8_UNORM = 2
+} ScRenderTextureFormat;
+
+typedef struct ScRenderTextureInfo
+{
+  uint32_t width;
+  uint32_t height;
+  uint32_t format;
+  uint32_t srgb;
+  uint64_t cpu_bytes;
+  uint64_t gpu_bytes;
+  uint32_t resident;
+  uint32_t from_disk;
+} ScRenderTextureInfo;
+
 typedef struct ScRenderLine
 {
   float a[3];
@@ -112,14 +131,18 @@ SC_RENDER_API ScRenderHandle scRenderLoadTexture(ScRenderContext* ctx, const cha
 SC_RENDER_API void scRenderUnloadTexture(ScRenderContext* ctx, ScRenderHandle texture);
 SC_RENDER_API ScRenderHandle scRenderLoadMaterial(ScRenderContext* ctx, const char* asset_path_or_id);
 SC_RENDER_API void scRenderUnloadMaterial(ScRenderContext* ctx, ScRenderHandle material);
+SC_RENDER_API ScRenderHandle scRenderCreateMaterialFromTexture(ScRenderContext* ctx, ScRenderHandle texture);
 
 SC_RENDER_API int scRenderGetMeshInfo(ScRenderContext* ctx, ScRenderHandle mesh, ScRenderMeshInfo* out_info);
+SC_RENDER_API int scRenderGetTextureInfo(ScRenderContext* ctx, ScRenderHandle texture, ScRenderTextureInfo* out_info);
+SC_RENDER_API int scRenderReloadTexture(ScRenderContext* ctx, ScRenderHandle texture);
 SC_RENDER_API void scRenderGetStats(ScRenderContext* ctx, ScRenderStats* out_stats);
 
 SC_RENDER_API int scRenderImGuiInit(ScRenderContext* ctx);
 SC_RENDER_API void scRenderImGuiShutdown(ScRenderContext* ctx);
 SC_RENDER_API void scRenderImGuiNewFrame(ScRenderContext* ctx);
 SC_RENDER_API void scRenderRenderImGui(ScRenderContext* ctx, const struct ImDrawData* draw_data);
+SC_RENDER_API void* scRenderGetImGuiTextureId(ScRenderContext* ctx, ScRenderHandle texture);
 
 #ifdef __cplusplus
 }

@@ -38,6 +38,8 @@ using sc::editor::AssetEntry;
 using sc::editor::AssetFolder;
 using sc::editor::AssetStatus;
 using sc::editor::AssetType;
+using sc::editor::EditorTextureCache;
+using sc::editor::TextureRecord;
 using sc::editor::requestLoadModelGLB;
 
 static constexpr float kEditorViewportAspect = 16.0f / 9.0f;
@@ -140,6 +142,30 @@ static void FormatAssetTime(uint64_t unix_seconds, char* out, size_t out_size)
   std::snprintf(out, out_size, "%04d-%02d-%02d %02d:%02d",
                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                 tm.tm_hour, tm.tm_min);
+}
+
+static void FormatBytes(uint64_t bytes, char* out, size_t out_size)
+{
+  if (!out || out_size == 0)
+    return;
+  const double kb = static_cast<double>(bytes) / 1024.0;
+  const double mb = kb / 1024.0;
+  if (mb >= 1.0)
+    std::snprintf(out, out_size, "%.2f MB", mb);
+  else if (kb >= 1.0)
+    std::snprintf(out, out_size, "%.1f KB", kb);
+  else
+    std::snprintf(out, out_size, "%llu B", static_cast<unsigned long long>(bytes));
+}
+
+static const char* TextureFormatLabel(uint32_t format)
+{
+  switch (format)
+  {
+    case SC_RENDER_TEXTURE_FORMAT_RGBA8_SRGB: return "RGBA8_SRGB";
+    case SC_RENDER_TEXTURE_FORMAT_RGBA8_UNORM: return "RGBA8_UNORM";
+    default: return "Unknown";
+  }
 }
 
 static bool AssetInFolder(const AssetEntry& entry, const std::string& folder_rel)
@@ -347,7 +373,10 @@ static void DrawProjectPanel(AssetDatabase* db, ProjectPanelState* state, AssetS
   ImGui::End();
 }
 
-static void DrawAssetInspector(const AssetDatabase& db, const AssetSelection& selection)
+static void DrawAssetInspector(const AssetDatabase& db,
+                               const AssetSelection& selection,
+                               ScRenderContext* render_ctx,
+                               EditorTextureCache* texture_cache)
 {
   if (ImGui::CollapsingHeader("Asset Inspector", ImGuiTreeNodeFlags_DefaultOpen))
   {
@@ -375,6 +404,64 @@ static void DrawAssetInspector(const AssetDatabase& db, const AssetSelection& se
     FormatAssetTime(entry->lastWriteTime, time_buf, sizeof(time_buf));
     ImGui::Text("Modified: %s", time_buf);
     ImGui::Text("Status: %s", AssetStatusLabel(entry->status));
+
+    if (entry->type == AssetType::Texture && render_ctx && texture_cache)
+    {
+      const TextureRecord* record = texture_cache->request(render_ctx, db, entry->id);
+      ImGui::Separator();
+      ImGui::TextUnformatted("Texture Preview");
+      if (!record || record->handle == 0)
+      {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Texture not loaded.");
+        return;
+      }
+
+      ImGui::Text("Dimensions: %ux%u", record->width, record->height);
+      ImGui::Text("Format: %s", TextureFormatLabel(record->format));
+      ImGui::Text("Color Space: %s", record->srgb ? "sRGB" : "Linear");
+      char mem_buf[32]{};
+      FormatBytes(record->gpuBytes, mem_buf, sizeof(mem_buf));
+      ImGui::Text("GPU Estimate: %s", mem_buf);
+
+      const bool modified = (record->fileModifiedTime != 0 && entry->lastWriteTime != record->fileModifiedTime);
+      if (modified)
+      {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Modified on disk.");
+      }
+      if (ImGui::Button("Reload"))
+      {
+        texture_cache->reload(render_ctx, db, entry->id);
+      }
+
+      if (!record->fromDisk)
+      {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Using fallback texture.");
+      }
+
+      ImTextureID tex_id = reinterpret_cast<ImTextureID>(scRenderGetImGuiTextureId(render_ctx, record->handle));
+      if (tex_id)
+      {
+        const float max_dim = 256.0f;
+        float avail = ImGui::GetContentRegionAvail().x;
+        float width = std::min(avail > 0.0f ? avail : max_dim, max_dim);
+        float height = width;
+        if (record->width > 0 && record->height > 0)
+        {
+          const float aspect = static_cast<float>(record->width) / static_cast<float>(record->height);
+          height = width / aspect;
+          if (height > max_dim)
+          {
+            height = max_dim;
+            width = height * aspect;
+          }
+        }
+        ImGui::Image(tex_id, ImVec2(width, height));
+      }
+      else
+      {
+        ImGui::TextDisabled("Preview unavailable.");
+      }
+    }
   }
 }
 
@@ -538,7 +625,9 @@ static void drawHierarchyPanel(EditorDocument* doc,
                                const EditorCamera* camera,
                                const std::string& world_root,
                                ScRenderContext* render_ctx,
-                               const EditorAssetRegistry& registry)
+                               const EditorAssetRegistry& registry,
+                               const AssetDatabase* asset_db,
+                               EditorTextureCache* texture_cache)
 {
   if (!doc || !camera)
     return;
@@ -584,7 +673,7 @@ static void drawHierarchyPanel(EditorDocument* doc,
     const std::string path = sc_world::BuildSectorPath(world_root.c_str(), doc->sector);
     sc_world::SectorFile file{};
     if (sc_world::ReadSectorFile(path.c_str(), &file))
-      sc::editor::DocumentFromSectorFile(doc, file, render_ctx, registry);
+      sc::editor::DocumentFromSectorFile(doc, file, render_ctx, registry, asset_db, texture_cache);
   }
 
   ImGui::Separator();
@@ -746,6 +835,7 @@ int main(int argc, char** argv)
   AssetDatabase asset_db;
   asset_db.setRoot(asset_root_path);
   asset_db.scanAll();
+  EditorTextureCache texture_cache;
   ProjectPanelState project_state;
   project_state.selectedFolder = "";
   AssetSelection asset_selection;
@@ -767,7 +857,7 @@ int main(int argc, char** argv)
   sc_world::SectorFile initial_file{};
   if (sc_world::ReadSectorFile(initial_path.c_str(), &initial_file))
   {
-    sc::editor::DocumentFromSectorFile(&doc, initial_file, render_ctx, registry);
+    sc::editor::DocumentFromSectorFile(&doc, initial_file, render_ctx, registry, &asset_db, &texture_cache);
   }
   else if (!registry.entries.empty())
   {
@@ -780,7 +870,7 @@ int main(int argc, char** argv)
       t.position[2] = 0.0f;
       EditorEntity* e = sc::editor::AddEntity(&doc, registry.entries[i], t);
       if (e)
-        sc::editor::ResolveEntityAssets(e, render_ctx, registry);
+        sc::editor::ResolveEntityAssets(e, render_ctx, registry, &asset_db, &texture_cache);
     }
   }
 
@@ -988,7 +1078,7 @@ int main(int argc, char** argv)
                 GizmoSpaceLabel(gizmo_settings.space));
     ImGui::End();
 
-    drawHierarchyPanel(&doc, &camera, world_root, render_ctx, registry);
+    drawHierarchyPanel(&doc, &camera, world_root, render_ctx, registry, &asset_db, &texture_cache);
 
     DrawProjectPanel(&asset_db, &project_state, &asset_selection);
 
@@ -1007,7 +1097,7 @@ int main(int argc, char** argv)
         e.transform.position[2] = camera.position[2] + forward[2] * 5.0f;
         if (doc.snapToGrid)
           sc::editor::SnapTransform(&e.transform, doc.gridSize);
-        sc::editor::ResolveEntityAssets(&e, render_ctx, registry);
+        sc::editor::ResolveEntityAssets(&e, render_ctx, registry, &asset_db, &texture_cache);
 
         auto cmd = std::make_unique<CmdPlaceEntity>();
         cmd->entity = e;
@@ -1015,7 +1105,7 @@ int main(int argc, char** argv)
       }
     }
 
-    DrawAssetInspector(asset_db, asset_selection);
+    DrawAssetInspector(asset_db, asset_selection, render_ctx, &texture_cache);
     ImGui::End();
 
     ImGui::Begin("Inspector");
@@ -1224,7 +1314,7 @@ int main(int argc, char** argv)
                 {
                   selected->meshAssetId = entry->mesh_id;
                   selected->materialAssetId = entry->material_id;
-                  sc::editor::ResolveEntityAssets(selected, render_ctx, registry);
+                  sc::editor::ResolveEntityAssets(selected, render_ctx, registry, &asset_db, &texture_cache);
                 }
               }
               if (is_selected)
@@ -1236,6 +1326,41 @@ int main(int argc, char** argv)
         else
         {
           ImGui::TextDisabled("No render assets loaded.");
+        }
+
+        ImGui::Separator();
+        const AssetEntry* override_entry = asset_db.findById(selected->albedoTextureAssetId);
+        const char* override_label = selected->useTexture
+          ? (override_entry ? override_entry->relPath.c_str() : "<missing>")
+          : "<none>";
+        ImGui::Text("Albedo Override: %s", override_label);
+        if (selected->useTexture)
+        {
+          if (ImGui::Button("Clear Override"))
+          {
+            selected->useTexture = false;
+            selected->albedoTextureAssetId = 0;
+            sc::editor::ResolveEntityAssets(selected, render_ctx, registry, &asset_db, &texture_cache);
+          }
+        }
+      }
+
+      const AssetEntry* selected_asset = asset_db.findById(asset_selection.id);
+      if (selected_asset && selected_asset->type == AssetType::Texture)
+      {
+        if (ImGui::CollapsingHeader("Assign To Selected Entity", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+          ImGui::Text("Texture: %s", selected_asset->relPath.c_str());
+          const char* slots[] = { "Albedo" };
+          static int slot_index = 0;
+          ImGui::SetNextItemWidth(140.0f);
+          ImGui::Combo("Slot", &slot_index, slots, IM_ARRAYSIZE(slots));
+          if (ImGui::Button("Set as Albedo"))
+          {
+            selected->albedoTextureAssetId = selected_asset->id;
+            selected->useTexture = true;
+            sc::editor::ResolveEntityAssets(selected, render_ctx, registry, &asset_db, &texture_cache);
+          }
         }
       }
 

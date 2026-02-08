@@ -1,4 +1,5 @@
 #include "editor_core.h"
+#include "sc_asset_db.h"
 
 #include <algorithm>
 #include <cmath>
@@ -190,7 +191,11 @@ namespace editor
       doc->selectedId = 0;
   }
 
-  void ResolveEntityAssets(EditorEntity* e, ScRenderContext* render, const EditorAssetRegistry& assets)
+  void ResolveEntityAssets(EditorEntity* e,
+                           ScRenderContext* render,
+                           const EditorAssetRegistry& assets,
+                           const AssetDatabase* assetDb,
+                           EditorTextureCache* textureCache)
   {
     if (!e || !render)
       return;
@@ -198,7 +203,18 @@ namespace editor
     if (!entry)
       return;
     e->meshHandle = scRenderLoadMesh(render, entry->mesh_path.c_str());
-    e->materialHandle = scRenderLoadMaterial(render, entry->material_path.c_str());
+    ScRenderHandle resolvedMaterial = 0;
+    if (e->useTexture && e->albedoTextureAssetId != 0 && assetDb && textureCache)
+    {
+      const ScRenderHandle tex = textureCache->resolveTextureHandle(render, *assetDb, e->albedoTextureAssetId);
+      if (tex != 0)
+        resolvedMaterial = scRenderCreateMaterialFromTexture(render, tex);
+    }
+
+    if (resolvedMaterial == 0)
+      resolvedMaterial = scRenderLoadMaterial(render, entry->material_path.c_str());
+
+    e->materialHandle = resolvedMaterial;
     scRenderGetMeshInfo(render, e->meshHandle, &e->meshInfo);
   }
 
@@ -575,7 +591,9 @@ namespace editor
   void DocumentFromSectorFile(EditorDocument* doc,
                               const sc_world::SectorFile& file,
                               ScRenderContext* render,
-                              const EditorAssetRegistry& assets)
+                              const EditorAssetRegistry& assets,
+                              const AssetDatabase* assetDb,
+                              EditorTextureCache* textureCache)
   {
     if (!doc)
       return;
@@ -588,6 +606,8 @@ namespace editor
       e.id = inst.id;
       e.meshAssetId = inst.mesh_id;
       e.materialAssetId = inst.material_id;
+      e.albedoTextureAssetId = inst.albedo_texture_id;
+      e.useTexture = (inst.material_flags & sc_world::kMaterialFlagUseTexture) != 0;
       if (inst.name[0] != '\0')
         std::snprintf(e.name, sizeof(e.name), "%s", inst.name);
       else
@@ -602,7 +622,7 @@ namespace editor
       e.transform.scale[1] = inst.transform.scale[1];
       e.transform.scale[2] = inst.transform.scale[2];
 
-      ResolveEntityAssets(&e, render, assets);
+      ResolveEntityAssets(&e, render, assets, assetDb, textureCache);
       doc->entities.push_back(e);
       doc->nextId = std::max(doc->nextId, e.id + 1);
     }
@@ -625,6 +645,8 @@ namespace editor
       inst.id = e.id;
       inst.mesh_id = e.meshAssetId;
       inst.material_id = e.materialAssetId;
+      inst.albedo_texture_id = e.useTexture ? e.albedoTextureAssetId : 0u;
+      inst.material_flags = e.useTexture ? sc_world::kMaterialFlagUseTexture : 0u;
       std::snprintf(inst.name, sizeof(inst.name), "%s", e.name);
       inst.tags = e.tags;
       inst.transform.position[0] = e.transform.position[0];

@@ -25,6 +25,13 @@ namespace sc
     Textured = 1
   };
 
+  enum class TextureFormat : uint32_t
+  {
+    Unknown = 0,
+    RGBA8_SRGB = 1,
+    RGBA8_UNORM = 2
+  };
+
   struct MaterialDesc
   {
     TextureHandle albedo = kInvalidTextureHandle;
@@ -49,6 +56,8 @@ namespace sc
     uint64_t cpuBytes = 0;
     uint64_t gpuBytes = 0;
     bool fromDisk = false;
+    bool srgb = true;
+    TextureFormat format = TextureFormat::RGBA8_SRGB;
     bool resident = false;
     bool pinned = false;
     uint64_t lastUsedFrame = 0;
@@ -120,13 +129,15 @@ namespace sc
 
     void setCommandContext(VkCommandPool commandPool, VkQueue graphicsQueue);
 
-    TextureHandle loadTexture2D(const std::string& path);
+    TextureHandle loadTexture2D(const std::string& path, bool srgb = true);
     MeshHandle loadMesh(const std::string& path);
     void registerMeshAlias(const std::string& path, MeshHandle handle);
     MaterialHandle createMaterial(const MaterialDesc& desc);
 
     const Material* getMaterial(MaterialHandle handle) const;
     const TextureAsset* getTexture(TextureHandle handle) const;
+    bool reloadTexture(TextureHandle handle);
+    TextureHandle placeholderTexture() const { return m_placeholderTexture; }
 
     AssetStatsSnapshot stats() const;
     std::vector<TextureDebugEntry> textureDebugEntries() const;
@@ -149,13 +160,14 @@ namespace sc
                                  uint32_t width,
                                  uint32_t height,
                                  bool fromDisk,
+                                 bool srgb,
                                  TextureHandle& outHandle);
-    bool reloadTexture(TextureHandle handle);
     void destroyTextureGpu(TextureAsset& texture);
     void refreshMaterialsForTexture(TextureHandle handle);
     bool uploadTexturePixels(const unsigned char* rgbaPixels,
                              uint32_t width,
                              uint32_t height,
+                             TextureFormat format,
                              TextureAsset& outTexture);
     bool writeMaterialDescriptor(Material& material);
     TextureHandle createFallbackTexture(const std::string& debugPath, AssetId id);

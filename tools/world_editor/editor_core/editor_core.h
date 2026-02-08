@@ -13,6 +13,8 @@ namespace sc
 {
 namespace editor
 {
+  class AssetDatabase;
+  class EditorTextureCache;
   struct EditorTransform
   {
     float position[3] = { 0.0f, 0.0f, 0.0f };
@@ -27,6 +29,8 @@ namespace editor
     EditorTransform transform{};
     sc_world::AssetId meshAssetId = 0;
     sc_world::AssetId materialAssetId = 0;
+    sc_world::AssetId albedoTextureAssetId = 0;
+    bool useTexture = false;
     uint32_t tags = 0;
 
     ScRenderHandle meshHandle = 0;
@@ -150,7 +154,11 @@ namespace editor
   void SetSelected(EditorDocument* doc, uint64_t id);
   void ValidateSelection(EditorDocument* doc);
 
-  void ResolveEntityAssets(EditorEntity* e, ScRenderContext* render, const EditorAssetRegistry& assets);
+  void ResolveEntityAssets(EditorEntity* e,
+                           ScRenderContext* render,
+                           const EditorAssetRegistry& assets,
+                           const AssetDatabase* assetDb,
+                           EditorTextureCache* textureCache);
 
   void BuildDrawItems(const EditorDocument* doc, std::vector<ScRenderDrawItem>* out_items);
   void BuildDebugLines(const EditorDocument* doc, std::vector<ScRenderLine>* out_lines);
@@ -197,7 +205,9 @@ namespace editor
   void DocumentFromSectorFile(EditorDocument* doc,
                               const sc_world::SectorFile& file,
                               ScRenderContext* render,
-                              const EditorAssetRegistry& assets);
+                              const EditorAssetRegistry& assets,
+                              const AssetDatabase* assetDb,
+                              EditorTextureCache* textureCache);
   void SectorFileFromDocument(const EditorDocument* doc, sc_world::SectorFile* out_file);
 }
 }

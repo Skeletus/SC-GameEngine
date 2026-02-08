@@ -189,6 +189,16 @@ namespace sc
     return key;
   }
 
+  static VkFormat toVkFormat(TextureFormat format)
+  {
+    switch (format)
+    {
+      case TextureFormat::RGBA8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+      case TextureFormat::RGBA8_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
+      default: return VK_FORMAT_R8G8B8A8_SRGB;
+    }
+  }
+
   bool AssetManager::init(const AssetManagerInit& init)
   {
     m_device = init.device;
@@ -203,7 +213,7 @@ namespace sc
     const std::array<unsigned char, 4> white = { 255, 255, 255, 255 };
     TextureHandle whiteHandle = kInvalidTextureHandle;
     if (!createTextureFromPixels("__default_white__", fnv1a64("__default_white__"),
-                                 white.data(), 1, 1, false, whiteHandle))
+                                 white.data(), 1, 1, false, true, whiteHandle))
     {
       sc::log(LogLevel::Error, "AssetManager: failed to create default white texture.");
       return false;
@@ -242,7 +252,7 @@ namespace sc
     m_graphicsQueue = graphicsQueue;
   }
 
-  TextureHandle AssetManager::loadTexture2D(const std::string& path)
+  TextureHandle AssetManager::loadTexture2D(const std::string& path, bool srgb)
   {
     const std::filesystem::path resolvedPath = resolveAssetPath(path);
     const std::string normalized = normalizePathForId(resolvedPath);
@@ -278,7 +288,7 @@ namespace sc
     }
 
     TextureHandle handle = kInvalidTextureHandle;
-    const bool ok = createTextureFromPixels(path, id, pixels, static_cast<uint32_t>(width), static_cast<uint32_t>(height), true, handle);
+    const bool ok = createTextureFromPixels(path, id, pixels, static_cast<uint32_t>(width), static_cast<uint32_t>(height), true, srgb, handle);
     stbi_image_free(pixels);
     if (!ok)
       return kInvalidTextureHandle;
@@ -584,8 +594,10 @@ namespace sc
                                              uint32_t width,
                                              uint32_t height,
                                              bool fromDisk,
+                                             bool srgb,
                                              TextureHandle& outHandle)
   {
+    const TextureFormat format = srgb ? TextureFormat::RGBA8_SRGB : TextureFormat::RGBA8_UNORM;
     TextureAsset texture{};
     texture.id = assetId;
     texture.path = debugPath;
@@ -595,12 +607,14 @@ namespace sc
     texture.cpuBytes = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4ull;
     texture.gpuBytes = texture.cpuBytes;
     texture.fromDisk = fromDisk;
+    texture.srgb = srgb;
+    texture.format = format;
     texture.resident = true;
     texture.pinned = !fromDisk;
     texture.lastUsedFrame = m_frameIndex;
     texture.loading = false;
 
-    if (!uploadTexturePixels(rgbaPixels, width, height, texture))
+    if (!uploadTexturePixels(rgbaPixels, width, height, format, texture))
       return false;
 
     outHandle = static_cast<TextureHandle>(m_textures.size());
@@ -639,7 +653,11 @@ namespace sc
     texture.gpuBytes = texture.cpuBytes;
     texture.fromDisk = true;
 
-    const bool ok = uploadTexturePixels(pixels, static_cast<uint32_t>(width), static_cast<uint32_t>(height), texture);
+    const bool ok = uploadTexturePixels(pixels,
+                                        static_cast<uint32_t>(width),
+                                        static_cast<uint32_t>(height),
+                                        texture.format,
+                                        texture);
     stbi_image_free(pixels);
     if (!ok)
       return false;
@@ -674,6 +692,7 @@ namespace sc
   bool AssetManager::uploadTexturePixels(const unsigned char* rgbaPixels,
                                          uint32_t width,
                                          uint32_t height,
+                                         TextureFormat format,
                                          TextureAsset& outTexture)
   {
     const VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4ull;
@@ -694,8 +713,9 @@ namespace sc
     std::memcpy(mapped, rgbaPixels, static_cast<size_t>(imageSize));
     vkUnmapMemory(m_device, stagingMemory);
 
+    const VkFormat vkFormat = toVkFormat(format);
     if (!createImage(m_device, m_phys, width, height, 1,
-                     VK_FORMAT_R8G8B8A8_SRGB,
+                     vkFormat,
                      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                      outTexture.image, outTexture.memory))
     {
@@ -730,7 +750,7 @@ namespace sc
     VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     ivci.image = outTexture.image;
     ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format = VK_FORMAT_R8G8B8A8_SRGB;
+    ivci.format = vkFormat;
     ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     ivci.subresourceRange.levelCount = 1;
     ivci.subresourceRange.layerCount = 1;
@@ -791,7 +811,7 @@ namespace sc
     };
 
     TextureHandle handle = kInvalidTextureHandle;
-    if (!createTextureFromPixels(debugPath, id, pixels.data(), 2, 2, false, handle))
+    if (!createTextureFromPixels(debugPath, id, pixels.data(), 2, 2, false, true, handle))
     {
       sc::log(LogLevel::Error, "AssetManager: failed to create fallback texture.");
       return m_defaultWhiteTexture;

@@ -1,6 +1,7 @@
 #pragma once
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <unordered_map>
 #include <cstdint>
 #include <cstddef>
 #include <string>
@@ -83,6 +84,7 @@ namespace sc
     void shutdownExternalImGui();
     void newExternalImGuiFrame();
     void setExternalImGuiDrawData(const ImDrawData* drawData) { m_externalImGuiDrawData = drawData; }
+    void* getImGuiTextureId(TextureHandle handle);
 
   private:
     bool createInstance(SDL_Window* window);
@@ -196,6 +198,13 @@ namespace sc
     VkDescriptorPool m_externalImGuiPool = VK_NULL_HANDLE;
     bool m_externalImGuiInitialized = false;
     const ImDrawData* m_externalImGuiDrawData = nullptr;
+    struct ImGuiTextureCacheEntry
+    {
+      VkImageView view = VK_NULL_HANDLE;
+      VkSampler sampler = VK_NULL_HANDLE;
+      VkDescriptorSet id = VK_NULL_HANDLE;
+    };
+    std::unordered_map<TextureHandle, ImGuiTextureCacheEntry> m_imguiTextureCache;
 
     VkBuffer m_debugVertexBuffers[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     VkDeviceMemory m_debugVertexMemory[MAX_FRAMES] = { VK_NULL_HANDLE, VK_NULL_HANDLE };

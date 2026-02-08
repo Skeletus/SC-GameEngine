@@ -95,8 +95,10 @@ namespace sc_world
     {
       const uint32_t count = static_cast<uint32_t>(file.instances.size());
       const uint32_t baseRecordSize = sizeof(uint64_t) + sizeof(AssetId) + sizeof(AssetId) + sizeof(Transform) + sizeof(uint32_t);
+      const uint32_t overrideSize = sizeof(AssetId) + sizeof(uint32_t);
       const bool writeName = (file.version >= 2);
-      const uint32_t recordSize = baseRecordSize + (writeName ? kInstanceNameMax : 0u);
+      const bool writeOverrides = (file.version >= 3);
+      const uint32_t recordSize = baseRecordSize + (writeName ? kInstanceNameMax : 0u) + (writeOverrides ? overrideSize : 0u);
       const uint32_t chunkSize = sizeof(uint32_t) + count * recordSize;
       WriteChunkHeader(out, kInstId, chunkSize);
       WriteValue(out, count);
@@ -109,6 +111,11 @@ namespace sc_world
         if (writeName)
           out.write(inst.name, static_cast<std::streamsize>(kInstanceNameMax));
         WriteValue(out, inst.tags);
+        if (writeOverrides)
+        {
+          WriteValue(out, inst.albedo_texture_id);
+          WriteValue(out, inst.material_flags);
+        }
       }
     }
 
@@ -213,13 +220,16 @@ namespace sc_world
         out_file->instances.resize(count);
 
         const uint32_t baseRecordSize = sizeof(uint64_t) + sizeof(AssetId) + sizeof(AssetId) + sizeof(Transform) + sizeof(uint32_t);
+        const uint32_t overrideSize = sizeof(AssetId) + sizeof(uint32_t);
         uint32_t recordSize = baseRecordSize;
         if (count > 0 && ch.size >= sizeof(uint32_t))
           recordSize = (ch.size - sizeof(uint32_t)) / count;
 
         const uint32_t nameRecordSize = baseRecordSize + kInstanceNameMax;
         const bool hasName = (recordSize >= nameRecordSize);
-        const uint32_t expectedSize = hasName ? nameRecordSize : baseRecordSize;
+        const uint32_t baseWithName = hasName ? nameRecordSize : baseRecordSize;
+        const bool hasOverrides = (recordSize >= baseWithName + overrideSize);
+        const uint32_t expectedSize = baseWithName + (hasOverrides ? overrideSize : 0u);
 
         for (uint32_t i = 0; i < count; ++i)
         {
@@ -238,6 +248,16 @@ namespace sc_world
             inst.name[0] = '\0';
           }
           ReadValue(in, inst.tags);
+          if (hasOverrides)
+          {
+            ReadValue(in, inst.albedo_texture_id);
+            ReadValue(in, inst.material_flags);
+          }
+          else
+          {
+            inst.albedo_texture_id = 0;
+            inst.material_flags = 0;
+          }
 
           if (recordSize > expectedSize)
           {

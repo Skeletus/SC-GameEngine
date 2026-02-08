@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "sc_engine_render.h"
 #include "world_format.h"
 
 namespace sc
@@ -78,6 +79,37 @@ namespace editor
     std::unordered_map<sc_world::AssetId, size_t> m_indexById;
     std::vector<AssetFolder> m_folders;
     std::unordered_map<std::string, int> m_folderIndex;
+  };
+
+  struct TextureRecord
+  {
+    sc_world::AssetId id = 0;
+    ScRenderHandle handle = 0;
+    uint64_t fileModifiedTime = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t format = 0;
+    bool srgb = true;
+    uint64_t cpuBytes = 0;
+    uint64_t gpuBytes = 0;
+    bool resident = false;
+    bool fromDisk = false;
+  };
+
+  class EditorTextureCache
+  {
+  public:
+    void clear();
+    const TextureRecord* find(sc_world::AssetId id) const;
+    const TextureRecord* request(ScRenderContext* render, const AssetDatabase& db, sc_world::AssetId id);
+    bool reload(ScRenderContext* render, const AssetDatabase& db, sc_world::AssetId id);
+    ScRenderHandle resolveTextureHandle(ScRenderContext* render, const AssetDatabase& db, sc_world::AssetId id);
+
+  private:
+    TextureRecord* findMutable(sc_world::AssetId id);
+    bool updateRecord(ScRenderContext* render, TextureRecord& record);
+
+    std::unordered_map<sc_world::AssetId, TextureRecord> m_records;
   };
 
   const char* AssetTypeLabel(AssetType type);

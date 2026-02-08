@@ -1545,6 +1545,12 @@ namespace sc
     if (m_externalImGuiInitialized)
     {
       vkDeviceWaitIdle(m_device);
+      for (auto& entry : m_imguiTextureCache)
+      {
+        if (entry.second.id)
+          ImGui_ImplVulkan_RemoveTexture(entry.second.id);
+      }
+      m_imguiTextureCache.clear();
       ImGui_ImplVulkan_Shutdown();
 
       ImGui_ImplVulkan_InitInfo info{};
@@ -1564,6 +1570,7 @@ namespace sc
         return false;
       if (!ImGui_ImplVulkan_CreateFontsTexture())
         return false;
+      m_imguiTextureCache.clear();
     }
     if (!createPipeline()) return false;
     if (!createFramebuffers()) return false;
@@ -1936,6 +1943,12 @@ namespace sc
       return;
 
     vkDeviceWaitIdle(m_device);
+    for (auto& entry : m_imguiTextureCache)
+    {
+      if (entry.second.id)
+        ImGui_ImplVulkan_RemoveTexture(entry.second.id);
+    }
+    m_imguiTextureCache.clear();
     ImGui_ImplVulkan_Shutdown();
     if (m_externalImGuiPool)
     {
@@ -1950,6 +1963,46 @@ namespace sc
     if (!m_externalImGuiInitialized)
       return;
     ImGui_ImplVulkan_NewFrame();
+  }
+
+  void* VkRenderer::getImGuiTextureId(TextureHandle handle)
+  {
+    if (!m_externalImGuiInitialized)
+      return nullptr;
+
+    TextureHandle effective = handle;
+    const TextureAsset* texture = m_assets.getTexture(handle);
+    if (!texture)
+      return nullptr;
+
+    if (!texture->resident)
+    {
+      m_assets.requestTextureResident(handle);
+      effective = m_assets.placeholderTexture();
+      texture = m_assets.getTexture(effective);
+    }
+
+    if (!texture || !texture->sampler || !texture->view)
+      return nullptr;
+
+    auto it = m_imguiTextureCache.find(effective);
+    if (it != m_imguiTextureCache.end())
+    {
+      if (it->second.view == texture->view && it->second.sampler == texture->sampler && it->second.id)
+        return reinterpret_cast<void*>(it->second.id);
+      if (it->second.id)
+        ImGui_ImplVulkan_RemoveTexture(it->second.id);
+    }
+
+    VkDescriptorSet id = ImGui_ImplVulkan_AddTexture(texture->sampler,
+                                                     texture->view,
+                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ImGuiTextureCacheEntry entry{};
+    entry.view = texture->view;
+    entry.sampler = texture->sampler;
+    entry.id = id;
+    m_imguiTextureCache[effective] = entry;
+    return reinterpret_cast<void*>(id);
   }
 
 }

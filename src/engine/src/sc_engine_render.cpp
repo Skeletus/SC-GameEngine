@@ -42,6 +42,16 @@ namespace
     return out;
   }
 
+  static ScRenderTextureFormat to_render_format(sc::TextureFormat format)
+  {
+    switch (format)
+    {
+      case sc::TextureFormat::RGBA8_SRGB: return SC_RENDER_TEXTURE_FORMAT_RGBA8_SRGB;
+      case sc::TextureFormat::RGBA8_UNORM: return SC_RENDER_TEXTURE_FORMAT_RGBA8_UNORM;
+      default: return SC_RENDER_TEXTURE_FORMAT_UNKNOWN;
+    }
+  }
+
   static void unpack_rgba(uint32_t rgba, float out_rgb[3])
   {
     const float inv = 1.0f / 255.0f;
@@ -227,6 +237,25 @@ void scRenderUnloadTexture(ScRenderContext* /*ctx*/, ScRenderHandle /*texture*/)
 {
 }
 
+ScRenderHandle scRenderCreateMaterialFromTexture(ScRenderContext* ctx, ScRenderHandle texture)
+{
+  if (!ctx || handle_type(texture) != HandleTexture)
+    return 0;
+
+  const sc::TextureHandle texHandle = handle_id(texture);
+  if (texHandle == sc::kInvalidTextureHandle)
+    return 0;
+
+  sc::MaterialDesc desc{};
+  desc.albedo = texHandle;
+  desc.unlit = false;
+
+  const sc::MaterialHandle handle = ctx->renderer.assets().createMaterial(desc);
+  if (handle == sc::kInvalidMaterialHandle)
+    return 0;
+  return make_handle(HandleMaterial, handle);
+}
+
 static bool is_unlit_material(const char* path)
 {
   if (!path)
@@ -305,6 +334,35 @@ int scRenderGetMeshInfo(ScRenderContext* ctx, ScRenderHandle mesh, ScRenderMeshI
   return 0;
 }
 
+int scRenderGetTextureInfo(ScRenderContext* ctx, ScRenderHandle texture, ScRenderTextureInfo* out_info)
+{
+  if (!ctx || !out_info || handle_type(texture) != HandleTexture)
+    return 0;
+
+  const uint32_t id = handle_id(texture);
+  const sc::TextureAsset* tex = ctx->renderer.assets().getTexture(id);
+  if (!tex)
+    return 0;
+
+  out_info->width = tex->width;
+  out_info->height = tex->height;
+  out_info->format = static_cast<uint32_t>(to_render_format(tex->format));
+  out_info->srgb = tex->srgb ? 1u : 0u;
+  out_info->cpu_bytes = tex->cpuBytes;
+  out_info->gpu_bytes = tex->gpuBytes;
+  out_info->resident = tex->resident ? 1u : 0u;
+  out_info->from_disk = tex->fromDisk ? 1u : 0u;
+  return 1;
+}
+
+int scRenderReloadTexture(ScRenderContext* ctx, ScRenderHandle texture)
+{
+  if (!ctx || handle_type(texture) != HandleTexture)
+    return 0;
+  const uint32_t id = handle_id(texture);
+  return ctx->renderer.assets().reloadTexture(id) ? 1 : 0;
+}
+
 void scRenderGetStats(ScRenderContext* ctx, ScRenderStats* out_stats)
 {
   if (!ctx || !out_stats)
@@ -345,4 +403,11 @@ void scRenderRenderImGui(ScRenderContext* ctx, const ImDrawData* draw_data)
   if (!ctx)
     return;
   ctx->imguiDrawData = draw_data;
+}
+
+void* scRenderGetImGuiTextureId(ScRenderContext* ctx, ScRenderHandle texture)
+{
+  if (!ctx || handle_type(texture) != HandleTexture)
+    return nullptr;
+  return ctx->renderer.getImGuiTextureId(handle_id(texture));
 }
