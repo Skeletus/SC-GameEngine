@@ -8,6 +8,7 @@
 
 #include "sc_engine_render.h"
 #include "world_format.h"
+#include "mesh_importer.h"
 
 namespace sc
 {
@@ -110,6 +111,48 @@ namespace editor
     bool updateRecord(ScRenderContext* render, TextureRecord& record);
 
     std::unordered_map<sc_world::AssetId, TextureRecord> m_records;
+  };
+
+  struct ModelRecord
+  {
+    sc_world::AssetId id = 0;
+    ScRenderHandle handle = 0;
+    ScRenderMeshInfo meshInfo{};
+    uint64_t fileModifiedTime = 0;
+    uint32_t vertexCount = 0;
+    uint32_t indexCount = 0;
+    uint32_t submeshCount = 0;
+    uint32_t vertexLayoutFlags = 0;
+    sc_world::AssetId defaultAlbedoTextureId = 0;
+    bool loadFailed = false;
+    std::string error;
+    sc_import::MeshData previewMesh;
+    sc_import::ImportedModel model;
+  };
+
+  class EditorModelCache
+  {
+  public:
+    void clear();
+    const ModelRecord* find(sc_world::AssetId id) const;
+    const ModelRecord* request(ScRenderContext* render, const AssetDatabase& db, sc_world::AssetId id);
+    bool reload(ScRenderContext* render, const AssetDatabase& db, sc_world::AssetId id);
+    ScRenderHandle resolveMeshHandle(ScRenderContext* render, const AssetDatabase& db, sc_world::AssetId id);
+
+  private:
+    ModelRecord* findMutable(sc_world::AssetId id);
+    bool ensureRegistry();
+    bool loadRecord(ScRenderContext* render,
+                    const AssetDatabase& db,
+                    const AssetEntry& entry,
+                    ModelRecord& record);
+    sc_world::AssetId resolveTextureAssetId(const AssetDatabase& db,
+                                            const AssetEntry& modelEntry,
+                                            const std::string& uri) const;
+
+    sc_import::ImporterRegistry m_registry;
+    bool m_registryReady = false;
+    std::unordered_map<sc_world::AssetId, ModelRecord> m_records;
   };
 
   const char* AssetTypeLabel(AssetType type);

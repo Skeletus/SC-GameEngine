@@ -40,6 +40,12 @@ namespace sc
     uint32_t indexCount = 0;
   };
 
+  struct MeshBounds
+  {
+    float min[3] = { 0.0f, 0.0f, 0.0f };
+    float max[3] = { 0.0f, 0.0f, 0.0f };
+  };
+
   struct VkConfig
   {
     bool enableValidation = true;
@@ -85,6 +91,16 @@ namespace sc
     void newExternalImGuiFrame();
     void setExternalImGuiDrawData(const ImDrawData* drawData) { m_externalImGuiDrawData = drawData; }
     void* getImGuiTextureId(TextureHandle handle);
+
+    MeshHandle createMesh(const MeshVertex* verts,
+                          uint32_t vertCount,
+                          const uint32_t* indices,
+                          uint32_t indexCount,
+                          const float boundsMin[3],
+                          const float boundsMax[3]);
+    void destroyMesh(MeshHandle handle);
+    bool getMeshBounds(MeshHandle handle, float out_min[3], float out_max[3]) const;
+    uint32_t meshCount() const { return static_cast<uint32_t>(m_meshes.size()); }
 
   private:
     bool createInstance(SDL_Window* window);
@@ -188,6 +204,7 @@ namespace sc
     DebugDraw* m_debugDraw = nullptr;
 
     std::vector<GpuMesh> m_meshes;
+    std::vector<MeshBounds> m_meshBounds;
     AssetManager m_assets{};
     std::vector<std::string> m_textureOptionLabels;
     std::vector<MaterialHandle> m_textureOptionMaterials;

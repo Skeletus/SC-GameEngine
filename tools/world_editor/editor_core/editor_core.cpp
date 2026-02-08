@@ -195,10 +195,31 @@ namespace editor
                            ScRenderContext* render,
                            const EditorAssetRegistry& assets,
                            const AssetDatabase* assetDb,
-                           EditorTextureCache* textureCache)
+                           EditorTextureCache* textureCache,
+                           EditorModelCache* modelCache)
   {
     if (!e || !render)
       return;
+    if (e->modelAssetId != 0 && assetDb && modelCache)
+    {
+      e->meshHandle = modelCache->resolveMeshHandle(render, *assetDb, e->modelAssetId);
+      ScRenderHandle resolvedMaterial = 0;
+      if (e->useTexture && e->albedoTextureAssetId != 0 && assetDb && textureCache)
+      {
+        const ScRenderHandle tex = textureCache->resolveTextureHandle(render, *assetDb, e->albedoTextureAssetId);
+        if (tex != 0)
+          resolvedMaterial = scRenderCreateMaterialFromTexture(render, tex);
+      }
+
+      if (resolvedMaterial == 0)
+        resolvedMaterial = scRenderLoadMaterial(render, "materials/checker");
+
+      e->materialHandle = resolvedMaterial;
+      if (e->meshHandle != 0)
+        scRenderGetMeshInfo(render, e->meshHandle, &e->meshInfo);
+      return;
+    }
+
     const sc_world::AssetRegistryEntry* entry = assets.findByIds(e->meshAssetId, e->materialAssetId);
     if (!entry)
       return;
@@ -593,7 +614,8 @@ namespace editor
                               ScRenderContext* render,
                               const EditorAssetRegistry& assets,
                               const AssetDatabase* assetDb,
-                              EditorTextureCache* textureCache)
+                              EditorTextureCache* textureCache,
+                              EditorModelCache* modelCache)
   {
     if (!doc)
       return;
@@ -604,6 +626,7 @@ namespace editor
     {
       EditorEntity e{};
       e.id = inst.id;
+      e.modelAssetId = inst.model_id;
       e.meshAssetId = inst.mesh_id;
       e.materialAssetId = inst.material_id;
       e.albedoTextureAssetId = inst.albedo_texture_id;
@@ -622,7 +645,7 @@ namespace editor
       e.transform.scale[1] = inst.transform.scale[1];
       e.transform.scale[2] = inst.transform.scale[2];
 
-      ResolveEntityAssets(&e, render, assets, assetDb, textureCache);
+      ResolveEntityAssets(&e, render, assets, assetDb, textureCache, modelCache);
       doc->entities.push_back(e);
       doc->nextId = std::max(doc->nextId, e.id + 1);
     }
@@ -643,6 +666,7 @@ namespace editor
     {
       sc_world::Instance inst{};
       inst.id = e.id;
+      inst.model_id = e.modelAssetId;
       inst.mesh_id = e.meshAssetId;
       inst.material_id = e.materialAssetId;
       inst.albedo_texture_id = e.useTexture ? e.albedoTextureAssetId : 0u;

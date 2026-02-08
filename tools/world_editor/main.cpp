@@ -39,7 +39,9 @@ using sc::editor::AssetFolder;
 using sc::editor::AssetStatus;
 using sc::editor::AssetType;
 using sc::editor::EditorTextureCache;
+using sc::editor::EditorModelCache;
 using sc::editor::TextureRecord;
+using sc::editor::ModelRecord;
 using sc::editor::requestLoadModelGLB;
 
 static constexpr float kEditorViewportAspect = 16.0f / 9.0f;
@@ -97,6 +99,8 @@ struct ViewportPanelState
   ImDrawList* draw_list = nullptr;
   bool hovered = false;
   bool clicked = false;
+  bool dropModel = false;
+  sc_world::AssetId droppedModelId = 0;
 };
 
 struct ProjectPanelState
@@ -111,6 +115,13 @@ struct AssetSelection
   sc_world::AssetId id = 0;
   std::string relPath;
   std::string absPath;
+};
+
+struct PlacementState
+{
+  bool active = false;
+  sc_world::AssetId assetId = 0;
+  std::string relPath;
 };
 
 static std::string ToLower(std::string text)
@@ -198,6 +209,185 @@ static bool AssetHasExtension(const std::string& path, const char* ext)
   std::filesystem::path p(path);
   std::string e = ToLower(p.extension().string());
   return e == ext;
+}
+
+struct PreviewVec3
+{
+  float x = 0.0f;
+  float y = 0.0f;
+  float z = 0.0f;
+};
+
+static PreviewVec3 pv3(float x, float y, float z) { return PreviewVec3{ x, y, z }; }
+static PreviewVec3 pv3_add(const PreviewVec3& a, const PreviewVec3& b) { return pv3(a.x + b.x, a.y + b.y, a.z + b.z); }
+static PreviewVec3 pv3_sub(const PreviewVec3& a, const PreviewVec3& b) { return pv3(a.x - b.x, a.y - b.y, a.z - b.z); }
+static PreviewVec3 pv3_mul(const PreviewVec3& a, float s) { return pv3(a.x * s, a.y * s, a.z * s); }
+static float pv3_dot(const PreviewVec3& a, const PreviewVec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static PreviewVec3 pv3_cross(const PreviewVec3& a, const PreviewVec3& b)
+{
+  return pv3(a.y * b.z - a.z * b.y,
+             a.z * b.x - a.x * b.z,
+             a.x * b.y - a.y * b.x);
+}
+static PreviewVec3 pv3_normalize(const PreviewVec3& v)
+{
+  const float len = std::sqrt(pv3_dot(v, v));
+  if (len <= 1e-6f)
+    return pv3(0, 0, 0);
+  return pv3_mul(v, 1.0f / len);
+}
+
+static void DrawModelPreviewWireframe(const sc_import::MeshData& mesh)
+{
+  if (mesh.vertices.empty() || mesh.indices.size() < 3)
+  {
+    ImGui::TextDisabled("Preview unavailable.");
+    return;
+  }
+
+  const float max_dim = 240.0f;
+  const float avail = ImGui::GetContentRegionAvail().x;
+  const float size = std::min(avail > 1.0f ? avail : max_dim, max_dim);
+  const ImVec2 canvas_size(size, size);
+  const ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(canvas_pos,
+                    ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y),
+                    ImGui::GetColorU32(ImVec4(0.06f, 0.06f, 0.08f, 1.0f)));
+  dl->AddRect(canvas_pos,
+              ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y),
+              ImGui::GetColorU32(ImVec4(0.2f, 0.2f, 0.25f, 1.0f)));
+
+  const PreviewVec3 center = pv3(mesh.bounds.center[0], mesh.bounds.center[1], mesh.bounds.center[2]);
+  const float radius = std::max(mesh.bounds.radius, 0.1f);
+  const float yaw = 0.7f;
+  const float pitch = 0.35f;
+  const float dist = radius * 2.5f + 0.5f;
+  const PreviewVec3 cam_pos = pv3(
+    center.x + dist * std::sin(yaw) * std::cos(pitch),
+    center.y + dist * std::sin(pitch),
+    center.z + dist * std::cos(yaw) * std::cos(pitch));
+  const PreviewVec3 forward = pv3_normalize(pv3_sub(center, cam_pos));
+  const PreviewVec3 right = pv3_normalize(pv3_cross(pv3(0, 1, 0), forward));
+  const PreviewVec3 up = pv3_cross(forward, right);
+
+  const float aspect = canvas_size.x / canvas_size.y;
+  const float fov = 60.0f * 3.1415926535f / 180.0f;
+  const float invTan = 1.0f / std::tan(fov * 0.5f);
+
+  auto project = [&](const PreviewVec3& p, ImVec2* out) -> bool
+  {
+    const PreviewVec3 rel = pv3_sub(p, cam_pos);
+    const float vx = pv3_dot(rel, right);
+    const float vy = pv3_dot(rel, up);
+    const float vz = pv3_dot(rel, forward);
+    if (vz <= 0.001f)
+      return false;
+    const float ndc_x = (vx * invTan / aspect) / vz;
+    const float ndc_y = (vy * invTan) / vz;
+    out->x = canvas_pos.x + (ndc_x * 0.5f + 0.5f) * canvas_size.x;
+    out->y = canvas_pos.y + (-ndc_y * 0.5f + 0.5f) * canvas_size.y;
+    return true;
+  };
+
+  const size_t tri_count = mesh.indices.size() / 3;
+  const size_t max_tris = 1500;
+  const size_t step = (tri_count > max_tris) ? (tri_count / max_tris) : 1;
+  const ImU32 color = ImGui::GetColorU32(ImVec4(0.8f, 0.85f, 0.95f, 1.0f));
+
+  for (size_t t = 0; t < tri_count; t += step)
+  {
+    const uint32_t i0 = mesh.indices[t * 3 + 0];
+    const uint32_t i1 = mesh.indices[t * 3 + 1];
+    const uint32_t i2 = mesh.indices[t * 3 + 2];
+    if (i0 >= mesh.vertices.size() || i1 >= mesh.vertices.size() || i2 >= mesh.vertices.size())
+      continue;
+    const sc_import::MeshVertex& v0 = mesh.vertices[i0];
+    const sc_import::MeshVertex& v1 = mesh.vertices[i1];
+    const sc_import::MeshVertex& v2 = mesh.vertices[i2];
+    ImVec2 p0{}, p1{}, p2{};
+    if (!project(pv3(v0.pos[0], v0.pos[1], v0.pos[2]), &p0) ||
+        !project(pv3(v1.pos[0], v1.pos[1], v1.pos[2]), &p1) ||
+        !project(pv3(v2.pos[0], v2.pos[1], v2.pos[2]), &p2))
+      continue;
+
+    dl->AddLine(p0, p1, color, 1.0f);
+    dl->AddLine(p1, p2, color, 1.0f);
+    dl->AddLine(p2, p0, color, 1.0f);
+  }
+
+  ImGui::InvisibleButton("##model_preview", canvas_size);
+}
+
+static bool RaycastGround(const EditorCamera* cam,
+                          float mouse_x,
+                          float mouse_y,
+                          const ViewportPanelState& viewport,
+                          float out_pos[3])
+{
+  if (!cam || !out_pos)
+    return false;
+  sc::editor::Ray ray = sc::editor::BuildPickRay(cam,
+                                                 mouse_x,
+                                                 mouse_y,
+                                                 viewport.render_pos.x,
+                                                 viewport.render_pos.y,
+                                                 viewport.render_size.x,
+                                                 viewport.render_size.y);
+
+  if (std::fabs(ray.dir[1]) < 1e-6f)
+    return false;
+
+  const float t = (0.0f - ray.origin[1]) / ray.dir[1];
+  if (t <= 0.0f)
+    return false;
+
+  out_pos[0] = ray.origin[0] + ray.dir[0] * t;
+  out_pos[1] = ray.origin[1] + ray.dir[1] * t;
+  out_pos[2] = ray.origin[2] + ray.dir[2] * t;
+  return true;
+}
+
+static bool BuildModelEntity(EditorDocument* doc,
+                             const AssetDatabase& db,
+                             EditorModelCache* model_cache,
+                             ScRenderContext* render_ctx,
+                             sc_world::AssetId modelId,
+                             const float pos[3],
+                             EditorEntity* out_entity)
+{
+  if (!doc || !out_entity || modelId == 0)
+    return false;
+
+  EditorEntity e{};
+  e.id = doc->nextId++;
+  e.modelAssetId = modelId;
+  e.meshAssetId = 0;
+  e.materialAssetId = 0;
+  e.useTexture = false;
+  e.albedoTextureAssetId = 0;
+  e.transform.position[0] = pos[0];
+  e.transform.position[1] = pos[1];
+  e.transform.position[2] = pos[2];
+
+  const AssetEntry* entry = db.findById(modelId);
+  std::string label = entry ? std::filesystem::path(entry->relPath).stem().string() : std::string("Model");
+  if (label.empty())
+    label = "Model";
+  std::snprintf(e.name, sizeof(e.name), "%s", label.c_str());
+
+  if (model_cache && render_ctx)
+  {
+    const ModelRecord* record = model_cache->request(render_ctx, db, modelId);
+    if (record && record->defaultAlbedoTextureId != 0)
+    {
+      e.useTexture = true;
+      e.albedoTextureAssetId = record->defaultAlbedoTextureId;
+    }
+  }
+
+  *out_entity = e;
+  return true;
 }
 
 static void DrawFolderTreeNode(const AssetDatabase& db, int index, std::string* selected_folder)
@@ -347,6 +537,17 @@ static void DrawProjectPanel(AssetDatabase* db, ProjectPanelState* state, AssetS
             }
           }
 
+          if (entry->type == AssetType::Model && AssetHasExtension(entry->relPath, ".glb"))
+          {
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+            {
+              sc_world::AssetId payload = entry->id;
+              ImGui::SetDragDropPayload("SC_MODEL_ASSET", &payload, sizeof(payload));
+              ImGui::Text("Place %s", name.c_str());
+              ImGui::EndDragDropSource();
+            }
+          }
+
           ImGui::TableSetColumnIndex(1);
           ImGui::TextUnformatted(AssetTypeLabel(entry->type));
 
@@ -376,7 +577,9 @@ static void DrawProjectPanel(AssetDatabase* db, ProjectPanelState* state, AssetS
 static void DrawAssetInspector(const AssetDatabase& db,
                                const AssetSelection& selection,
                                ScRenderContext* render_ctx,
-                               EditorTextureCache* texture_cache)
+                               EditorTextureCache* texture_cache,
+                               EditorModelCache* model_cache,
+                               PlacementState* place_state)
 {
   if (ImGui::CollapsingHeader("Asset Inspector", ImGuiTreeNodeFlags_DefaultOpen))
   {
@@ -461,6 +664,50 @@ static void DrawAssetInspector(const AssetDatabase& db,
       {
         ImGui::TextDisabled("Preview unavailable.");
       }
+    }
+
+    if (entry->type == AssetType::Model && render_ctx && model_cache)
+    {
+      ImGui::Separator();
+      ImGui::TextUnformatted("Model Preview");
+      const ModelRecord* record = model_cache->request(render_ctx, db, entry->id);
+      if (!record || record->handle == 0)
+      {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Model not loaded.");
+        if (record && record->loadFailed && !record->error.empty())
+          ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", record->error.c_str());
+      }
+      else
+      {
+        ImGui::Text("Vertices: %u", record->vertexCount);
+        ImGui::Text("Indices: %u", record->indexCount);
+        ImGui::Text("Submeshes: %u", record->submeshCount);
+        const float sx = record->meshInfo.bounds_max[0] - record->meshInfo.bounds_min[0];
+        const float sy = record->meshInfo.bounds_max[1] - record->meshInfo.bounds_min[1];
+        const float sz = record->meshInfo.bounds_max[2] - record->meshInfo.bounds_min[2];
+        ImGui::Text("Bounds: %.2f x %.2f x %.2f", sx, sy, sz);
+
+        const bool modified = (record->fileModifiedTime != 0 && entry->lastWriteTime != record->fileModifiedTime);
+        if (modified)
+          ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Modified on disk.");
+      }
+
+      if (ImGui::Button("Reload Model"))
+        model_cache->reload(render_ctx, db, entry->id);
+
+      if (place_state)
+      {
+        ImGui::SameLine();
+        if (ImGui::Button("Place"))
+        {
+          place_state->active = true;
+          place_state->assetId = entry->id;
+          place_state->relPath = entry->relPath;
+        }
+      }
+
+      if (record && !record->previewMesh.vertices.empty())
+        DrawModelPreviewWireframe(record->previewMesh);
     }
   }
 }
@@ -627,7 +874,8 @@ static void drawHierarchyPanel(EditorDocument* doc,
                                ScRenderContext* render_ctx,
                                const EditorAssetRegistry& registry,
                                const AssetDatabase* asset_db,
-                               EditorTextureCache* texture_cache)
+                               EditorTextureCache* texture_cache,
+                               EditorModelCache* model_cache)
 {
   if (!doc || !camera)
     return;
@@ -673,7 +921,7 @@ static void drawHierarchyPanel(EditorDocument* doc,
     const std::string path = sc_world::BuildSectorPath(world_root.c_str(), doc->sector);
     sc_world::SectorFile file{};
     if (sc_world::ReadSectorFile(path.c_str(), &file))
-      sc::editor::DocumentFromSectorFile(doc, file, render_ctx, registry, asset_db, texture_cache);
+      sc::editor::DocumentFromSectorFile(doc, file, render_ctx, registry, asset_db, texture_cache, model_cache);
   }
 
   ImGui::Separator();
@@ -706,6 +954,19 @@ static ViewportPanelState drawViewportPanel(float target_aspect)
   if (state.size.x < 1.0f) state.size.x = 1.0f;
   if (state.size.y < 1.0f) state.size.y = 1.0f;
   ImGui::InvisibleButton("viewport_capture", state.size);
+  if (ImGui::BeginDragDropTarget())
+  {
+    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SC_MODEL_ASSET"))
+    {
+      if (payload->DataSize == sizeof(sc_world::AssetId))
+      {
+        const sc_world::AssetId dropped = *reinterpret_cast<const sc_world::AssetId*>(payload->Data);
+        state.dropModel = true;
+        state.droppedModelId = dropped;
+      }
+    }
+    ImGui::EndDragDropTarget();
+  }
 
   const ImVec2 panel_min = state.pos;
   const ImVec2 panel_max = ImVec2(state.pos.x + state.size.x, state.pos.y + state.size.y);
@@ -836,6 +1097,7 @@ int main(int argc, char** argv)
   asset_db.setRoot(asset_root_path);
   asset_db.scanAll();
   EditorTextureCache texture_cache;
+  EditorModelCache model_cache;
   ProjectPanelState project_state;
   project_state.selectedFolder = "";
   AssetSelection asset_selection;
@@ -846,6 +1108,7 @@ int main(int argc, char** argv)
   CommandStack cmd_stack;
   GizmoState gizmo;
   GizmoSettings gizmo_settings;
+  PlacementState placement;
 
   const int32_t initial_sector_x = static_cast<int32_t>(std::floor(camera.position[0] / doc.sectorSize));
   const int32_t initial_sector_z = static_cast<int32_t>(std::floor(camera.position[2] / doc.sectorSize));
@@ -857,7 +1120,7 @@ int main(int argc, char** argv)
   sc_world::SectorFile initial_file{};
   if (sc_world::ReadSectorFile(initial_path.c_str(), &initial_file))
   {
-    sc::editor::DocumentFromSectorFile(&doc, initial_file, render_ctx, registry, &asset_db, &texture_cache);
+    sc::editor::DocumentFromSectorFile(&doc, initial_file, render_ctx, registry, &asset_db, &texture_cache, &model_cache);
   }
   else if (!registry.entries.empty())
   {
@@ -870,7 +1133,7 @@ int main(int argc, char** argv)
       t.position[2] = 0.0f;
       EditorEntity* e = sc::editor::AddEntity(&doc, registry.entries[i], t);
       if (e)
-        sc::editor::ResolveEntityAssets(e, render_ctx, registry, &asset_db, &texture_cache);
+        sc::editor::ResolveEntityAssets(e, render_ctx, registry, &asset_db, &texture_cache, &model_cache);
     }
   }
 
@@ -1076,9 +1339,14 @@ int main(int argc, char** argv)
     ImGui::Separator();
     ImGui::Text("Mode: %s | Space: %s", GizmoModeLabel(gizmo_settings.mode),
                 GizmoSpaceLabel(gizmo_settings.space));
+    if (placement.active)
+    {
+      ImGui::Separator();
+      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Placement: click to place, Esc to cancel");
+    }
     ImGui::End();
 
-    drawHierarchyPanel(&doc, &camera, world_root, render_ctx, registry, &asset_db, &texture_cache);
+    drawHierarchyPanel(&doc, &camera, world_root, render_ctx, registry, &asset_db, &texture_cache, &model_cache);
 
     DrawProjectPanel(&asset_db, &project_state, &asset_selection);
 
@@ -1097,7 +1365,7 @@ int main(int argc, char** argv)
         e.transform.position[2] = camera.position[2] + forward[2] * 5.0f;
         if (doc.snapToGrid)
           sc::editor::SnapTransform(&e.transform, doc.gridSize);
-        sc::editor::ResolveEntityAssets(&e, render_ctx, registry, &asset_db, &texture_cache);
+        sc::editor::ResolveEntityAssets(&e, render_ctx, registry, &asset_db, &texture_cache, &model_cache);
 
         auto cmd = std::make_unique<CmdPlaceEntity>();
         cmd->entity = e;
@@ -1105,7 +1373,7 @@ int main(int argc, char** argv)
       }
     }
 
-    DrawAssetInspector(asset_db, asset_selection, render_ctx, &texture_cache);
+    DrawAssetInspector(asset_db, asset_selection, render_ctx, &texture_cache, &model_cache, &placement);
     ImGui::End();
 
     ImGui::Begin("Inspector");
@@ -1279,53 +1547,61 @@ int main(int argc, char** argv)
 
       if (ImGui::CollapsingHeader("Render", ImGuiTreeNodeFlags_DefaultOpen))
       {
-        const sc_world::AssetRegistryEntry* current =
-          registry.findByIds(selected->meshAssetId, selected->materialAssetId);
-        ImGui::Text("Mesh: %s", current ? current->mesh_path.c_str() : "<missing>");
-        ImGui::Text("Material: %s", current ? current->material_path.c_str() : "<missing>");
-
-        if (!asset_cache_ready || asset_entries.size() != registry.entries.size())
+        if (selected->modelAssetId != 0)
         {
-          asset_entries.clear();
-          asset_labels.clear();
-          asset_entries.reserve(registry.entries.size());
-          asset_labels.reserve(registry.entries.size());
-          for (const auto& entry : registry.entries)
-          {
-            asset_entries.push_back(&entry);
-            asset_labels.push_back(entry.label.c_str());
-          }
-          asset_cache_ready = true;
-        }
-
-        if (!asset_entries.empty())
-        {
-          const char* preview = current ? current->label.c_str() : "<missing>";
-          if (ImGui::BeginCombo("Asset", preview))
-          {
-            for (size_t i = 0; i < asset_entries.size(); ++i)
-            {
-              const bool is_selected = (current == asset_entries[i]);
-              if (ImGui::Selectable(asset_labels[i], is_selected))
-              {
-                const auto* entry = asset_entries[i];
-                if (entry && (selected->meshAssetId != entry->mesh_id ||
-                              selected->materialAssetId != entry->material_id))
-                {
-                  selected->meshAssetId = entry->mesh_id;
-                  selected->materialAssetId = entry->material_id;
-                  sc::editor::ResolveEntityAssets(selected, render_ctx, registry, &asset_db, &texture_cache);
-                }
-              }
-              if (is_selected)
-                ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
-          }
+          const AssetEntry* model_entry = asset_db.findById(selected->modelAssetId);
+          ImGui::Text("Model: %s", model_entry ? model_entry->relPath.c_str() : "<missing>");
         }
         else
         {
-          ImGui::TextDisabled("No render assets loaded.");
+          const sc_world::AssetRegistryEntry* current =
+            registry.findByIds(selected->meshAssetId, selected->materialAssetId);
+          ImGui::Text("Mesh: %s", current ? current->mesh_path.c_str() : "<missing>");
+          ImGui::Text("Material: %s", current ? current->material_path.c_str() : "<missing>");
+
+          if (!asset_cache_ready || asset_entries.size() != registry.entries.size())
+          {
+            asset_entries.clear();
+            asset_labels.clear();
+            asset_entries.reserve(registry.entries.size());
+            asset_labels.reserve(registry.entries.size());
+            for (const auto& entry : registry.entries)
+            {
+              asset_entries.push_back(&entry);
+              asset_labels.push_back(entry.label.c_str());
+            }
+            asset_cache_ready = true;
+          }
+
+          if (!asset_entries.empty())
+          {
+            const char* preview = current ? current->label.c_str() : "<missing>";
+            if (ImGui::BeginCombo("Asset", preview))
+            {
+              for (size_t i = 0; i < asset_entries.size(); ++i)
+              {
+                const bool is_selected = (current == asset_entries[i]);
+                if (ImGui::Selectable(asset_labels[i], is_selected))
+                {
+                  const auto* entry = asset_entries[i];
+                  if (entry && (selected->meshAssetId != entry->mesh_id ||
+                                selected->materialAssetId != entry->material_id))
+                  {
+                    selected->meshAssetId = entry->mesh_id;
+                    selected->materialAssetId = entry->material_id;
+                    sc::editor::ResolveEntityAssets(selected, render_ctx, registry, &asset_db, &texture_cache, &model_cache);
+                  }
+                }
+                if (is_selected)
+                  ImGui::SetItemDefaultFocus();
+              }
+              ImGui::EndCombo();
+            }
+          }
+          else
+          {
+            ImGui::TextDisabled("No render assets loaded.");
+          }
         }
 
         ImGui::Separator();
@@ -1340,7 +1616,7 @@ int main(int argc, char** argv)
           {
             selected->useTexture = false;
             selected->albedoTextureAssetId = 0;
-            sc::editor::ResolveEntityAssets(selected, render_ctx, registry, &asset_db, &texture_cache);
+            sc::editor::ResolveEntityAssets(selected, render_ctx, registry, &asset_db, &texture_cache, &model_cache);
           }
         }
       }
@@ -1359,7 +1635,7 @@ int main(int argc, char** argv)
           {
             selected->albedoTextureAssetId = selected_asset->id;
             selected->useTexture = true;
-            sc::editor::ResolveEntityAssets(selected, render_ctx, registry, &asset_db, &texture_cache);
+            sc::editor::ResolveEntityAssets(selected, render_ctx, registry, &asset_db, &texture_cache, &model_cache);
           }
         }
       }
@@ -1405,6 +1681,13 @@ int main(int argc, char** argv)
     ImGui::End();
 
     ViewportPanelState viewport = drawViewportPanel(kEditorViewportAspect);
+
+    if (placement.active && ImGui::IsKeyPressed(ImGuiKey_Escape))
+    {
+      placement.active = false;
+      placement.assetId = 0;
+      placement.relPath.clear();
+    }
 
     ImGuiIO& frame_io = ImGui::GetIO();
     if (!frame_io.WantTextInput)
@@ -1557,7 +1840,44 @@ int main(int argc, char** argv)
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y))
       cmd_stack.redoLast(&doc);
 
-    if (viewport.clicked && viewport.hovered && !gizmo_over && !gizmo_using)
+    auto placeModelAtMouse = [&](sc_world::AssetId assetId)
+    {
+      float pos[3]{};
+      if (!RaycastGround(&camera, static_cast<float>(mx), static_cast<float>(my), viewport, pos))
+      {
+        float forward[3]{};
+        sc::editor::CameraForward(&camera, forward);
+        pos[0] = camera.position[0] + forward[0] * 5.0f;
+        pos[1] = camera.position[1] + forward[1] * 5.0f;
+        pos[2] = camera.position[2] + forward[2] * 5.0f;
+      }
+
+      EditorEntity placed{};
+      if (BuildModelEntity(&doc, asset_db, &model_cache, render_ctx, assetId, pos, &placed))
+      {
+        if (doc.snapToGrid)
+          sc::editor::SnapTransform(&placed.transform, doc.gridSize);
+        sc::editor::ResolveEntityAssets(&placed, render_ctx, registry, &asset_db, &texture_cache, &model_cache);
+
+        auto cmd = std::make_unique<CmdPlaceEntity>();
+        cmd->entity = placed;
+        cmd_stack.execute(std::move(cmd), &doc);
+        sc::editor::SetSelected(&doc, placed.id);
+      }
+    };
+
+    if (viewport.dropModel && viewport.droppedModelId != 0)
+    {
+      placeModelAtMouse(viewport.droppedModelId);
+    }
+    else if (placement.active && viewport.clicked && viewport.hovered && !gizmo_over && !gizmo_using)
+    {
+      placeModelAtMouse(placement.assetId);
+      placement.active = false;
+      placement.assetId = 0;
+      placement.relPath.clear();
+    }
+    else if (viewport.clicked && viewport.hovered && !gizmo_over && !gizmo_using)
     {
       uint64_t picked = pickEntityFromMouse(&doc, &camera,
                                             static_cast<float>(mx),

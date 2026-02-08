@@ -1197,6 +1197,8 @@ namespace sc
   {
     m_meshes.clear();
     m_meshes.resize(2);
+    m_meshBounds.clear();
+    m_meshBounds.resize(2);
 
     const MeshVertex triVerts[] =
     {
@@ -1262,12 +1264,35 @@ namespace sc
       { cubeVerts, (uint32_t)(sizeof(cubeVerts) / sizeof(cubeVerts[0])), cubeIndices, (uint32_t)(sizeof(cubeIndices) / sizeof(cubeIndices[0])) }
     };
 
-    for (size_t i = 0; i < m_meshes.size(); ++i)
+    auto computeBounds = [](const MeshVertex* verts, uint32_t count)
     {
-      const MeshSource& src = sources[i];
-      GpuMesh& mesh = m_meshes[i];
+      MeshBounds b{};
+      if (!verts || count == 0)
+        return b;
+      b.min[0] = b.max[0] = verts[0].pos[0];
+      b.min[1] = b.max[1] = verts[0].pos[1];
+      b.min[2] = b.max[2] = verts[0].pos[2];
+      for (uint32_t i = 1; i < count; ++i)
+      {
+        b.min[0] = std::min(b.min[0], verts[i].pos[0]);
+        b.min[1] = std::min(b.min[1], verts[i].pos[1]);
+        b.min[2] = std::min(b.min[2], verts[i].pos[2]);
+        b.max[0] = std::max(b.max[0], verts[i].pos[0]);
+        b.max[1] = std::max(b.max[1], verts[i].pos[1]);
+        b.max[2] = std::max(b.max[2], verts[i].pos[2]);
+      }
+      return b;
+    };
 
-      const VkDeviceSize vsize = sizeof(MeshVertex) * src.vertCount;
+    auto createGpuMesh = [&](const MeshVertex* verts,
+                             uint32_t vertCount,
+                             const uint32_t* indices,
+                             uint32_t indexCount,
+                             GpuMesh& mesh) -> bool
+    {
+      if (!verts || vertCount == 0 || !indices || indexCount == 0)
+        return false;
+      const VkDeviceSize vsize = sizeof(MeshVertex) * vertCount;
       if (!createBuffer(m_device, m_phys, vsize,
                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -1280,10 +1305,10 @@ namespace sc
       void* vdst = nullptr;
       if (vkMapMemory(m_device, mesh.vertexMemory, 0, vsize, 0, &vdst) != VK_SUCCESS)
         return false;
-      std::memcpy(vdst, src.verts, (size_t)vsize);
+      std::memcpy(vdst, verts, static_cast<size_t>(vsize));
       vkUnmapMemory(m_device, mesh.vertexMemory);
 
-      const VkDeviceSize isize = sizeof(uint32_t) * src.indexCount;
+      const VkDeviceSize isize = sizeof(uint32_t) * indexCount;
       if (!createBuffer(m_device, m_phys, isize,
                         VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -1296,10 +1321,20 @@ namespace sc
       void* idst = nullptr;
       if (vkMapMemory(m_device, mesh.indexMemory, 0, isize, 0, &idst) != VK_SUCCESS)
         return false;
-      std::memcpy(idst, src.indices, (size_t)isize);
+      std::memcpy(idst, indices, static_cast<size_t>(isize));
       vkUnmapMemory(m_device, mesh.indexMemory);
 
-      mesh.indexCount = src.indexCount;
+      mesh.indexCount = indexCount;
+      return true;
+    };
+
+    for (size_t i = 0; i < m_meshes.size(); ++i)
+    {
+      const MeshSource& src = sources[i];
+      GpuMesh& mesh = m_meshes[i];
+      if (!createGpuMesh(src.verts, src.vertCount, src.indices, src.indexCount, mesh))
+        return false;
+      m_meshBounds[i] = computeBounds(src.verts, src.vertCount);
     }
 
     sc::log(sc::LogLevel::Info, "Meshes created: %zu", m_meshes.size());
@@ -1385,6 +1420,96 @@ namespace sc
       mesh = GpuMesh{};
     }
     m_meshes.clear();
+    m_meshBounds.clear();
+  }
+
+  MeshHandle VkRenderer::createMesh(const MeshVertex* verts,
+                                    uint32_t vertCount,
+                                    const uint32_t* indices,
+                                    uint32_t indexCount,
+                                    const float boundsMin[3],
+                                    const float boundsMax[3])
+  {
+    if (!verts || !indices || vertCount == 0 || indexCount == 0)
+      return kInvalidMeshHandle;
+
+    GpuMesh mesh{};
+    const VkDeviceSize vsize = sizeof(MeshVertex) * vertCount;
+    if (!createBuffer(m_device, m_phys, vsize,
+                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      mesh.vertexBuffer, mesh.vertexMemory))
+    {
+      return kInvalidMeshHandle;
+    }
+
+    void* vdst = nullptr;
+    if (vkMapMemory(m_device, mesh.vertexMemory, 0, vsize, 0, &vdst) != VK_SUCCESS)
+      return kInvalidMeshHandle;
+    std::memcpy(vdst, verts, static_cast<size_t>(vsize));
+    vkUnmapMemory(m_device, mesh.vertexMemory);
+
+    const VkDeviceSize isize = sizeof(uint32_t) * indexCount;
+    if (!createBuffer(m_device, m_phys, isize,
+                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      mesh.indexBuffer, mesh.indexMemory))
+    {
+      return kInvalidMeshHandle;
+    }
+
+    void* idst = nullptr;
+    if (vkMapMemory(m_device, mesh.indexMemory, 0, isize, 0, &idst) != VK_SUCCESS)
+      return kInvalidMeshHandle;
+    std::memcpy(idst, indices, static_cast<size_t>(isize));
+    vkUnmapMemory(m_device, mesh.indexMemory);
+
+    mesh.indexCount = indexCount;
+
+    const MeshHandle handle = static_cast<MeshHandle>(m_meshes.size());
+    m_meshes.push_back(mesh);
+
+    MeshBounds bounds{};
+    if (boundsMin && boundsMax)
+    {
+      bounds.min[0] = boundsMin[0];
+      bounds.min[1] = boundsMin[1];
+      bounds.min[2] = boundsMin[2];
+      bounds.max[0] = boundsMax[0];
+      bounds.max[1] = boundsMax[1];
+      bounds.max[2] = boundsMax[2];
+    }
+    m_meshBounds.push_back(bounds);
+
+    return handle;
+  }
+
+  void VkRenderer::destroyMesh(MeshHandle handle)
+  {
+    if (handle >= m_meshes.size())
+      return;
+    GpuMesh& mesh = m_meshes[handle];
+    if (mesh.vertexBuffer) vkDestroyBuffer(m_device, mesh.vertexBuffer, nullptr);
+    if (mesh.vertexMemory) vkFreeMemory(m_device, mesh.vertexMemory, nullptr);
+    if (mesh.indexBuffer) vkDestroyBuffer(m_device, mesh.indexBuffer, nullptr);
+    if (mesh.indexMemory) vkFreeMemory(m_device, mesh.indexMemory, nullptr);
+    mesh = GpuMesh{};
+    if (handle < m_meshBounds.size())
+      m_meshBounds[handle] = MeshBounds{};
+  }
+
+  bool VkRenderer::getMeshBounds(MeshHandle handle, float out_min[3], float out_max[3]) const
+  {
+    if (!out_min || !out_max || handle >= m_meshBounds.size())
+      return false;
+    const MeshBounds& b = m_meshBounds[handle];
+    out_min[0] = b.min[0];
+    out_min[1] = b.min[1];
+    out_min[2] = b.min[2];
+    out_max[0] = b.max[0];
+    out_max[1] = b.max[1];
+    out_max[2] = b.max[2];
+    return true;
   }
 
   bool VkRenderer::createDebugDrawBuffers(size_t vertexCapacity)

@@ -10,7 +10,7 @@ namespace sc_world
   static constexpr uint32_t kWorldMagic = 0x444C5257;  // "WRLD"
   static constexpr uint32_t kSectorMagic = 0x54434553; // "SECT"
   static constexpr uint32_t kWorldVersion = 1;
-  static constexpr uint32_t kSectorVersion = 3;
+  static constexpr uint32_t kSectorVersion = 4;
   static constexpr uint32_t kInstanceNameMax = 64;
   static constexpr uint32_t kMaterialFlagUseTexture = 1u;
 
@@ -33,6 +33,7 @@ namespace sc_world
   struct Instance
   {
     uint64_t id = 0;
+    AssetId model_id = 0;
     AssetId mesh_id = 0;
     AssetId material_id = 0;
     AssetId albedo_texture_id = 0;

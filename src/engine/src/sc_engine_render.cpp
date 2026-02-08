@@ -8,6 +8,7 @@
 #include "sc_paths.h"
 
 #include <cstring>
+#include <vector>
 
 namespace
 {
@@ -219,8 +220,34 @@ ScRenderHandle scRenderLoadMesh(ScRenderContext* ctx, const char* asset_path_or_
   return make_handle(HandleMesh, handle);
 }
 
-void scRenderUnloadMesh(ScRenderContext* /*ctx*/, ScRenderHandle /*mesh*/)
+void scRenderUnloadMesh(ScRenderContext* ctx, ScRenderHandle mesh)
 {
+  if (!ctx || handle_type(mesh) != HandleMesh)
+    return;
+  const uint32_t id = handle_id(mesh);
+  ctx->renderer.destroyMesh(id);
+}
+
+ScRenderHandle scRenderCreateMesh(ScRenderContext* ctx, const ScRenderMeshData* data)
+{
+  if (!ctx || !data || !data->vertices || !data->indices)
+    return 0;
+  if (data->vertex_count == 0 || data->index_count == 0)
+    return 0;
+
+  std::vector<sc::MeshVertex> verts;
+  verts.resize(data->vertex_count);
+  std::memcpy(verts.data(), data->vertices, sizeof(sc::MeshVertex) * data->vertex_count);
+
+  const sc::MeshHandle handle = ctx->renderer.createMesh(verts.data(),
+                                                         data->vertex_count,
+                                                         data->indices,
+                                                         data->index_count,
+                                                         data->bounds_min,
+                                                         data->bounds_max);
+  if (handle == sc::kInvalidMeshHandle)
+    return 0;
+  return make_handle(HandleMesh, handle);
 }
 
 ScRenderHandle scRenderLoadTexture(ScRenderContext* ctx, const char* asset_path_or_id)
@@ -311,27 +338,7 @@ int scRenderGetMeshInfo(ScRenderContext* ctx, ScRenderHandle mesh, ScRenderMeshI
     return 0;
 
   const uint32_t id = handle_id(mesh);
-  if (id == 0u)
-  {
-    out_info->bounds_min[0] = -0.5f;
-    out_info->bounds_min[1] = -0.5f;
-    out_info->bounds_min[2] = 0.0f;
-    out_info->bounds_max[0] = 0.5f;
-    out_info->bounds_max[1] = 0.5f;
-    out_info->bounds_max[2] = 0.0f;
-    return 1;
-  }
-  if (id == 1u)
-  {
-    out_info->bounds_min[0] = -0.5f;
-    out_info->bounds_min[1] = -0.5f;
-    out_info->bounds_min[2] = -0.5f;
-    out_info->bounds_max[0] = 0.5f;
-    out_info->bounds_max[1] = 0.5f;
-    out_info->bounds_max[2] = 0.5f;
-    return 1;
-  }
-  return 0;
+  return ctx->renderer.getMeshBounds(id, out_info->bounds_min, out_info->bounds_max) ? 1 : 0;
 }
 
 int scRenderGetTextureInfo(ScRenderContext* ctx, ScRenderHandle texture, ScRenderTextureInfo* out_info)
@@ -371,7 +378,7 @@ void scRenderGetStats(ScRenderContext* ctx, ScRenderStats* out_stats)
   const sc::AssetStatsSnapshot stats = ctx->renderer.assets().stats();
   out_stats->draw_calls = static_cast<uint32_t>(ctx->frame.draws.size());
   out_stats->triangle_count = 0;
-  out_stats->mesh_count = stats.meshCount;
+  out_stats->mesh_count = ctx->renderer.meshCount();
   out_stats->texture_count = stats.textureCount;
   out_stats->gpu_ms = 0.0f;
   out_stats->cpu_ms = 0.0f;

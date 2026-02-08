@@ -15,6 +15,7 @@ namespace editor
 {
   class AssetDatabase;
   class EditorTextureCache;
+  class EditorModelCache;
   struct EditorTransform
   {
     float position[3] = { 0.0f, 0.0f, 0.0f };
@@ -27,6 +28,7 @@ namespace editor
     uint64_t id = 0;
     char name[64] = "Entity";
     EditorTransform transform{};
+    sc_world::AssetId modelAssetId = 0;
     sc_world::AssetId meshAssetId = 0;
     sc_world::AssetId materialAssetId = 0;
     sc_world::AssetId albedoTextureAssetId = 0;
@@ -158,7 +160,8 @@ namespace editor
                            ScRenderContext* render,
                            const EditorAssetRegistry& assets,
                            const AssetDatabase* assetDb,
-                           EditorTextureCache* textureCache);
+                           EditorTextureCache* textureCache,
+                           EditorModelCache* modelCache);
 
   void BuildDrawItems(const EditorDocument* doc, std::vector<ScRenderDrawItem>* out_items);
   void BuildDebugLines(const EditorDocument* doc, std::vector<ScRenderLine>* out_lines);
@@ -207,7 +210,8 @@ namespace editor
                               ScRenderContext* render,
                               const EditorAssetRegistry& assets,
                               const AssetDatabase* assetDb,
-                              EditorTextureCache* textureCache);
+                              EditorTextureCache* textureCache,
+                              EditorModelCache* modelCache);
   void SectorFileFromDocument(const EditorDocument* doc, sc_world::SectorFile* out_file);
 }
 }

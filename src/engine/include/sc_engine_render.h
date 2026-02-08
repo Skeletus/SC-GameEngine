@@ -68,6 +68,23 @@ typedef struct ScRenderMeshInfo
   float bounds_max[3];
 } ScRenderMeshInfo;
 
+typedef struct ScRenderMeshVertex
+{
+  float pos[3];
+  float color[3];
+  float uv[2];
+} ScRenderMeshVertex;
+
+typedef struct ScRenderMeshData
+{
+  const ScRenderMeshVertex* vertices;
+  uint32_t vertex_count;
+  const uint32_t* indices;
+  uint32_t index_count;
+  float bounds_min[3];
+  float bounds_max[3];
+} ScRenderMeshData;
+
 typedef enum ScRenderTextureFormat
 {
   SC_RENDER_TEXTURE_FORMAT_UNKNOWN = 0,
@@ -127,6 +144,7 @@ SC_RENDER_API void scRenderEndFrame(ScRenderContext* ctx);
 
 SC_RENDER_API ScRenderHandle scRenderLoadMesh(ScRenderContext* ctx, const char* asset_path_or_id);
 SC_RENDER_API void scRenderUnloadMesh(ScRenderContext* ctx, ScRenderHandle mesh);
+SC_RENDER_API ScRenderHandle scRenderCreateMesh(ScRenderContext* ctx, const ScRenderMeshData* data);
 SC_RENDER_API ScRenderHandle scRenderLoadTexture(ScRenderContext* ctx, const char* asset_path_or_id);
 SC_RENDER_API void scRenderUnloadTexture(ScRenderContext* ctx, ScRenderHandle texture);
 SC_RENDER_API ScRenderHandle scRenderLoadMaterial(ScRenderContext* ctx, const char* asset_path_or_id);

@@ -94,7 +94,10 @@ namespace sc_world
     if (!file.instances.empty())
     {
       const uint32_t count = static_cast<uint32_t>(file.instances.size());
-      const uint32_t baseRecordSize = sizeof(uint64_t) + sizeof(AssetId) + sizeof(AssetId) + sizeof(Transform) + sizeof(uint32_t);
+      const bool writeModel = (file.version >= 4);
+      const uint32_t baseRecordSize = sizeof(uint64_t) + sizeof(AssetId) + sizeof(AssetId) +
+                                      (writeModel ? sizeof(AssetId) : 0u) +
+                                      sizeof(Transform) + sizeof(uint32_t);
       const uint32_t overrideSize = sizeof(AssetId) + sizeof(uint32_t);
       const bool writeName = (file.version >= 2);
       const bool writeOverrides = (file.version >= 3);
@@ -105,6 +108,8 @@ namespace sc_world
       for (const Instance& inst : file.instances)
       {
         WriteValue(out, inst.id);
+        if (writeModel)
+          WriteValue(out, inst.model_id);
         WriteValue(out, inst.mesh_id);
         WriteValue(out, inst.material_id);
         WriteValue(out, inst.transform);
@@ -219,15 +224,18 @@ namespace sc_world
         ReadValue(in, count);
         out_file->instances.resize(count);
 
-        const uint32_t baseRecordSize = sizeof(uint64_t) + sizeof(AssetId) + sizeof(AssetId) + sizeof(Transform) + sizeof(uint32_t);
+        const uint32_t baseRecordSizeV3 = sizeof(uint64_t) + sizeof(AssetId) + sizeof(AssetId) + sizeof(Transform) + sizeof(uint32_t);
+        const uint32_t baseRecordSizeV4 = baseRecordSizeV3 + sizeof(AssetId);
         const uint32_t overrideSize = sizeof(AssetId) + sizeof(uint32_t);
-        uint32_t recordSize = baseRecordSize;
+        uint32_t recordSize = baseRecordSizeV3;
         if (count > 0 && ch.size >= sizeof(uint32_t))
           recordSize = (ch.size - sizeof(uint32_t)) / count;
 
-        const uint32_t nameRecordSize = baseRecordSize + kInstanceNameMax;
+        const bool hasModel = (out_file->version >= 4);
+        const uint32_t baseWithModel = hasModel ? baseRecordSizeV4 : baseRecordSizeV3;
+        const uint32_t nameRecordSize = baseWithModel + kInstanceNameMax;
         const bool hasName = (recordSize >= nameRecordSize);
-        const uint32_t baseWithName = hasName ? nameRecordSize : baseRecordSize;
+        const uint32_t baseWithName = baseWithModel + (hasName ? kInstanceNameMax : 0u);
         const bool hasOverrides = (recordSize >= baseWithName + overrideSize);
         const uint32_t expectedSize = baseWithName + (hasOverrides ? overrideSize : 0u);
 
@@ -235,6 +243,10 @@ namespace sc_world
         {
           Instance inst{};
           ReadValue(in, inst.id);
+          if (hasModel)
+            ReadValue(in, inst.model_id);
+          else
+            inst.model_id = 0;
           ReadValue(in, inst.mesh_id);
           ReadValue(in, inst.material_id);
           ReadValue(in, inst.transform);

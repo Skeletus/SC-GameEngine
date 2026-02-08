@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 
 namespace sc
 {
@@ -313,6 +314,211 @@ namespace editor
                                                           sc_world::AssetId id)
   {
     const TextureRecord* record = request(render, db, id);
+    return record ? record->handle : 0;
+  }
+
+  void EditorModelCache::clear()
+  {
+    m_records.clear();
+  }
+
+  const ModelRecord* EditorModelCache::find(sc_world::AssetId id) const
+  {
+    auto it = m_records.find(id);
+    if (it == m_records.end())
+      return nullptr;
+    return &it->second;
+  }
+
+  ModelRecord* EditorModelCache::findMutable(sc_world::AssetId id)
+  {
+    auto it = m_records.find(id);
+    if (it == m_records.end())
+      return nullptr;
+    return &it->second;
+  }
+
+  bool EditorModelCache::ensureRegistry()
+  {
+    if (m_registryReady)
+      return true;
+    sc_import::RegisterGlbImporter(&m_registry);
+    m_registryReady = true;
+    return true;
+  }
+
+  sc_world::AssetId EditorModelCache::resolveTextureAssetId(const AssetDatabase& db,
+                                                            const AssetEntry& modelEntry,
+                                                            const std::string& uri) const
+  {
+    if (uri.empty())
+      return 0;
+    if (uri.rfind("data:", 0) == 0)
+      return 0;
+
+    std::filesystem::path texPath(uri);
+    if (texPath.is_relative())
+    {
+      std::filesystem::path baseDir = std::filesystem::path(modelEntry.absPath).parent_path();
+      texPath = baseDir / texPath;
+    }
+
+    std::error_code ec;
+    std::filesystem::path rel = std::filesystem::relative(texPath, db.root(), ec);
+    if (ec || rel.empty() || rel == "." || !isParentPathComponentValid(rel))
+      return 0;
+
+    const std::string relPath = rel.generic_string();
+    const sc_world::AssetId id = sc_world::HashAssetPath(relPath.c_str());
+    const AssetEntry* entry = db.findById(id);
+    if (!entry || entry->type != AssetType::Texture)
+      return 0;
+
+    return id;
+  }
+
+  bool EditorModelCache::loadRecord(ScRenderContext* render,
+                                    const AssetDatabase& db,
+                                    const AssetEntry& entry,
+                                    ModelRecord& record)
+  {
+    if (!render)
+      return false;
+    if (!ensureRegistry())
+      return false;
+
+    record.fileModifiedTime = entry.lastWriteTime;
+    record.loadFailed = false;
+    record.error.clear();
+
+    sc_import::ImportedModel model{};
+    sc_import::MeshImportOptions options{};
+    options.bakeNodeTransforms = true;
+    std::string error;
+    if (!m_registry.importModel(entry.absPath.c_str(), options, &model, &error))
+    {
+      record.loadFailed = true;
+      record.error = error;
+      return false;
+    }
+
+    sc_import::MeshData merged{};
+    if (!sc_import::FlattenModelToMesh(model, &merged, &error))
+    {
+      record.loadFailed = true;
+      record.error = error;
+      return false;
+    }
+
+    std::vector<ScRenderMeshVertex> verts;
+    verts.resize(merged.vertices.size());
+    for (size_t i = 0; i < merged.vertices.size(); ++i)
+    {
+      const sc_import::MeshVertex& src = merged.vertices[i];
+      ScRenderMeshVertex& dst = verts[i];
+      dst.pos[0] = src.pos[0];
+      dst.pos[1] = src.pos[1];
+      dst.pos[2] = src.pos[2];
+      dst.color[0] = 1.0f;
+      dst.color[1] = 1.0f;
+      dst.color[2] = 1.0f;
+      dst.uv[0] = src.uv0[0];
+      dst.uv[1] = src.uv0[1];
+    }
+
+    ScRenderMeshData meshData{};
+    meshData.vertices = verts.data();
+    meshData.vertex_count = static_cast<uint32_t>(verts.size());
+    meshData.indices = merged.indices.data();
+    meshData.index_count = static_cast<uint32_t>(merged.indices.size());
+    meshData.bounds_min[0] = merged.bounds.min[0];
+    meshData.bounds_min[1] = merged.bounds.min[1];
+    meshData.bounds_min[2] = merged.bounds.min[2];
+    meshData.bounds_max[0] = merged.bounds.max[0];
+    meshData.bounds_max[1] = merged.bounds.max[1];
+    meshData.bounds_max[2] = merged.bounds.max[2];
+
+    const ScRenderHandle handle = scRenderCreateMesh(render, &meshData);
+    if (handle == 0)
+    {
+      record.loadFailed = true;
+      record.error = "Render mesh creation failed.";
+      return false;
+    }
+
+    if (record.handle != 0)
+      scRenderUnloadMesh(render, record.handle);
+
+    record.handle = handle;
+    record.vertexCount = meshData.vertex_count;
+    record.indexCount = meshData.index_count;
+    record.submeshCount = static_cast<uint32_t>(merged.submeshes.size());
+    record.vertexLayoutFlags = merged.vertexLayoutFlags;
+
+    scRenderGetMeshInfo(render, record.handle, &record.meshInfo);
+
+    int materialIndex = -1;
+    if (!merged.submeshes.empty())
+      materialIndex = merged.submeshes[0].materialIndex;
+    if (materialIndex < 0 && !model.materials.empty())
+      materialIndex = 0;
+    if (materialIndex >= 0 && materialIndex < static_cast<int>(model.materials.size()))
+      record.defaultAlbedoTextureId = resolveTextureAssetId(db, entry, model.materials[materialIndex].baseColorTexture);
+    else
+      record.defaultAlbedoTextureId = 0;
+
+    record.previewMesh = std::move(merged);
+    record.model = std::move(model);
+    return true;
+  }
+
+  const ModelRecord* EditorModelCache::request(ScRenderContext* render,
+                                               const AssetDatabase& db,
+                                               sc_world::AssetId id)
+  {
+    if (!render || id == 0)
+      return nullptr;
+
+    const AssetEntry* entry = db.findById(id);
+    if (!entry || entry->type != AssetType::Model)
+      return nullptr;
+
+    ModelRecord& record = m_records[id];
+    if (record.id == 0)
+      record.id = id;
+
+    if (record.loadFailed && record.fileModifiedTime == entry->lastWriteTime)
+      return &record;
+
+    const bool needsLoad = (record.handle == 0) || (record.fileModifiedTime != entry->lastWriteTime);
+    if (needsLoad)
+      loadRecord(render, db, *entry, record);
+
+    return record.handle != 0 ? &record : nullptr;
+  }
+
+  bool EditorModelCache::reload(ScRenderContext* render,
+                                const AssetDatabase& db,
+                                sc_world::AssetId id)
+  {
+    if (!render || id == 0)
+      return false;
+    const AssetEntry* entry = db.findById(id);
+    if (!entry || entry->type != AssetType::Model)
+      return false;
+
+    ModelRecord& record = m_records[id];
+    if (record.id == 0)
+      record.id = id;
+
+    return loadRecord(render, db, *entry, record);
+  }
+
+  ScRenderHandle EditorModelCache::resolveMeshHandle(ScRenderContext* render,
+                                                     const AssetDatabase& db,
+                                                     sc_world::AssetId id)
+  {
+    const ModelRecord* record = request(render, db, id);
     return record ? record->handle : 0;
   }
 
